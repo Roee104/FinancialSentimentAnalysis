@@ -1,51 +1,51 @@
 """
-splitter.py
+src/splitter.py
 
 Provides sentence and clause splitting utilities for aspect-based sentiment analysis.
-Uses NLTK for sentence tokenization and regex-based clause splitting.
+Uses NLTK for sentence tokenization and regex-based clause splitting,
+with a word-count–based filter to retain meaningful chunks.
 """
 
 import nltk
 import re
 
-# Ensure the Punkt tokenizer models are available. Uncomment on first run:
-nltk.download('punkt')
+# Uncomment if running for the first time to download punkt
+# nltk.download('punkt')
 
 from nltk.tokenize import sent_tokenize
 
-# Regex for splitting on semicolons and coordinating conjunctions
+# Regex for splitting on semicolons and key conjunctions
 CLAUSE_DELIM_RE = re.compile(
-    r'\s*;\s*'                          # semicolons as boundaries
-    r'|\s+(?:and|but|while|however)\s+',  # coordinating conjunctions
+    r"\s*;\s*"               # split on semicolons
+    r"|\s+(?:and|but|while|however)\s+",  # split on conjunctions
     flags=re.IGNORECASE
 )
 
 
 def split_sentences(text: str) -> list[str]:
     """
-    Split raw text into sentences using NLTK's PunktSentenceTokenizer.
+    Split raw text into sentences using NLTK's Punkt tokenizer.
 
     Args:
         text (str): Full text or paragraph.
-
     Returns:
-        list[str]: List of sentence strings.
+        List[str]: Sentences extracted from text.
     """
     return sent_tokenize(text)
 
 
 def split_clauses(sentence: str, min_length_for_commas: int = 40) -> list[str]:
     """
-    Break a sentence into smaller clauses:
-    1) Split on semicolons and core conjunctions (and, but, while, however).
-    2) If a fragment is longer than `min_length_for_commas`, further split on commas.
+    Break a sentence into smaller clause fragments.
+
+    1. Split on semicolons and core conjunctions.
+    2. Further split long fragments (over min_length_for_commas chars) on commas.
 
     Args:
         sentence (str): A single sentence string.
-        min_length_for_commas (int): Minimum length to allow comma-based splitting.
-
+        min_length_for_commas (int): Length threshold for comma splitting.
     Returns:
-        list[str]: List of clause fragments.
+        List[str]: Clause-level fragments.
     """
     parts = CLAUSE_DELIM_RE.split(sentence)
     final = []
@@ -53,7 +53,7 @@ def split_clauses(sentence: str, min_length_for_commas: int = 40) -> list[str]:
         part = part.strip()
         if not part:
             continue
-        # Further split long clauses on commas
+        # If fragment is long and contains commas, split on commas
         if len(part) > min_length_for_commas and ',' in part:
             for sub in map(str.strip, part.split(',')):
                 if sub:
@@ -63,25 +63,27 @@ def split_clauses(sentence: str, min_length_for_commas: int = 40) -> list[str]:
     return final
 
 
-def split_to_chunks(text: str,
-                    min_clause_length: int = 20,
-                    min_length_for_commas: int = 40) -> list[str]:
+def split_to_chunks(
+    text: str,
+    min_clause_words: int = 3,
+    min_length_for_commas: int = 40
+) -> list[str]:
     """
     Convert full text into sentence- and clause-level chunks,
-    filtering out fragments shorter than `min_clause_length`.
+    filtering by a minimum word count to keep meaningful fragments.
 
     Args:
         text (str): Full article or paragraph.
-        min_clause_length (int): Minimum length of a clause to keep.
-        min_length_for_commas (int): Min length for comma-based splitting.
-
+        min_clause_words (int): Minimum number of words per chunk.
+        min_length_for_commas (int): Threshold for comma-based splitting.
     Returns:
-        list[str]: Cleaned list of text chunks.
+        List[str]: Cleaned list of text chunks.
     """
     chunks = []
     for sent in split_sentences(text):
         for clause in split_clauses(sent, min_length_for_commas):
-            if len(clause) >= min_clause_length:
+            # Keep only clauses with enough words
+            if len(clause.split()) >= min_clause_words:
                 chunks.append(clause)
     return chunks
 
@@ -92,5 +94,6 @@ if __name__ == "__main__":
         "but guidance was light, and investors were underwhelmed. "
         "Meanwhile, Microsoft saw strong cloud growth."
     )
+    print("Sample Chunks:")
     for chunk in split_to_chunks(sample):
         print("➤", chunk)
