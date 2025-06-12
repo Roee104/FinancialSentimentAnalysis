@@ -16,6 +16,7 @@ New in this version:
   SECTOR_LOOKUP loaded once at import time.
 """
 import pandas as pd
+import yfinance as yf
 from typing import List, Dict, Tuple
 from collections import defaultdict
 
@@ -40,8 +41,8 @@ SECTOR_LOOKUP = load_sector_lookup()
 
 def compute_ticker_sentiment(
     ticker_chunks: List[Tuple[str, str, float]],
-    method: str = "majority",
-    threshold: float = 0.2
+    method: str = "conf_weighted",
+    threshold: float = 0.1
 ) -> Dict[str, Dict]:
     """
     Aggregate chunk-level sentiment for each ticker.
@@ -113,10 +114,11 @@ def compute_ticker_sentiment(
 
 def compute_sector_sentiment(
     ticker_sentiments: Dict[str, Dict],
-    threshold: float = 0.2
+    threshold: float = 0.1
 ) -> Dict[str, Dict]:
     """
     Aggregate ticker-level sentiments into sector-level.
+    filling Unknown sectors on the fly via yfinance.
 
     Args:
         ticker_sentiments: mapping ticker -> {'score','label','confidence'}
@@ -125,36 +127,44 @@ def compute_sector_sentiment(
     Returns:
         Dict mapping sector -> {score, label, confidence, weight}
     """
-    agg = defaultdict(lambda: {'score_sum': 0.0, 'conf_sum': 0.0, 'count': 0})
+    agg = defaultdict(lambda: {"score_sum": 0.0, "conf_sum": 0.0, "count": 0})
     for ticker, info in ticker_sentiments.items():
-        sector = SECTOR_LOOKUP.get(ticker, 'Unknown')
-        agg[sector]['score_sum'] += info['score']
-        agg[sector]['conf_sum'] += info['confidence']
-        agg[sector]['count'] += 1
+        sector = SECTOR_LOOKUP.get(ticker)
+        if not sector or sector == "Unknown":
+            try:
+                info_yf = yf.Ticker(ticker).info
+                sector = info_yf.get("sector") or "Unknown"
+            except Exception:
+                sector = "Unknown"
+            SECTOR_LOOKUP[ticker] = sector  # cache
+
+        agg[sector]["score_sum"] += info["score"]
+        agg[sector]["conf_sum"] += info["confidence"]
+        agg[sector]["count"] += 1
 
     results = {}
     for sector, d in agg.items():
-        cnt = d['count']
-        avg_score = d['score_sum'] / cnt if cnt else 0.0
-        avg_conf = d['conf_sum'] / cnt if cnt else 0.0
+        cnt = d["count"]
+        avg_score = d["score_sum"] / cnt if cnt else 0.0
+        avg_conf = d["conf_sum"] / cnt if cnt else 0.0
         if avg_score > threshold:
-            label = 'Positive'
+            label = "Positive"
         elif avg_score < -threshold:
-            label = 'Negative'
+            label = "Negative"
         else:
-            label = 'Neutral'
+            label = "Neutral"
         results[sector] = {
-            'score':      avg_score,
-            'label':      label,
-            'confidence': avg_conf,
-            'weight':     cnt
+            "score":      avg_score,
+            "label":      label,
+            "confidence": avg_conf,
+            "weight":     cnt
         }
     return results
 
 
 def compute_article_sentiment(
     ticker_sentiments: Dict[str, Dict],
-    threshold: float = 0.2
+    threshold: float = 0.1
 ) -> Tuple[str, float]:
     """
     Compute overall article sentiment from ticker-level scores.

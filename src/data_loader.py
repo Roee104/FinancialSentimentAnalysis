@@ -27,9 +27,21 @@ SLEEP_SEC = 0.3
 
 # Broad tags to query for diversified coverage.
 TAGS = [
-    'earnings release', 'earnings results', 'class action', 'financial results',
-    'insider transactions', 'price target', 'quarterly results', 'revenue growth',
-    'initial public offering', 'institutional ownership', 'share price', 'research analysis and reports'
+    'balance sheet', 'capital employed', 'class action', 'company announcement',
+    'consensus eps estimate', 'consensus estimate', 'credit rating',
+    'discounted cash flow', 'dividend payments', 'earnings estimate',
+    'earnings growth', 'earnings per share', 'earnings release', 'earnings report',
+    'earnings results', 'earnings surprise', 'estimate revisions',
+    'european regulatory news', 'financial results', 'fourth quarter',
+    'free cash flow', 'future cash flows', 'growth rate', 'initial public offering',
+    'insider ownership', 'insider transactions', 'institutional investors',
+    'institutional ownership', 'intrinsic value', 'market research reports',
+    'net income', 'operating income', 'present value', 'press releases',
+    'price target', 'quarterly earnings', 'quarterly results', 'ratings',
+    'research analysis and reports', 'return on equity', 'revenue estimates',
+    'revenue growth', 'roce', 'roe', 'share price', 'shareholder rights',
+    'shareholder', 'shares outstanding', 'split', 'strong buy', 'total revenue',
+    'zacks investment research', 'zacks rank'
 ]
 
 # Helper function: fetch one page of articles for a given tag and offset
@@ -144,5 +156,5 @@ df = df[[
 ]]
 
 # Save to Parquet
-df.to_parquet("data/financial_news_2020_2025.parquet", index=False)
-print("✅ Dataset saved to data/financial_news_2020_2025.parquet")
+df.to_parquet("data/financial_news_2020_2025_100k.parquet", index=False)
+print("✅ Dataset saved to data/financial_news_2020_2025_100k.parquet")

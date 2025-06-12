@@ -1,0 +1,11 @@
+{
+  "num_articles": 25963,
+  "avg_chars": 93.91441666987636,
+  "median_chars": 89,
+  "min_chars": 16,
+  "max_chars": 297,
+  "avg_words": 13.82205446211917,
+  "median_words": 13,
+  "min_words": 1,
+  "max_words": 44
+}
