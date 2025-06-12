@@ -52,6 +52,7 @@ pyzmq==26.4.0
 regex==2024.11.6
 requests==2.32.3
 safetensors==0.5.3
+seaborn==0.13.2
 setuptools==80.9.0
 six==1.17.0
 stack-data==0.6.3

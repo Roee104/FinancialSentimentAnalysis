@@ -4,18 +4,20 @@ aggregator.py
 Aggregates chunk-level FinBERT sentiment results into per-ticker,
 per-sector, and overall article sentiment scores.
 
-Functions:
-- load_sector_lookup: fetches S&P 500 ticker-to-sector mapping from Wikipedia.
-- compute_ticker_sentiment: given a list of (ticker, label, confidence) tuples,
-  returns final label, score, and confidence per ticker.
-- compute_sector_sentiment: maps tickers to GICS sectors and aggregates their scores.
-- compute_article_sentiment: aggregates ticker-level results into overall sentiment.
+New in this version:
+
+- compute_ticker_sentiment(..., method, threshold):
+    • method="default": (pos-neg)/total with ±threshold for Neutral
+    • method="majority": label by chunk-count majority, score=(pos-neg)/total
+    • method="conf_weighted": score=(Σconf_pos-Σconf_neg)/Σconf_all,
+      label by ±threshold
+
+- compute_sector_sentiment and compute_article_sentiment use a global
+  SECTOR_LOOKUP loaded once at import time.
 """
 import pandas as pd
 from typing import List, Dict, Tuple
 from collections import defaultdict
-
-# 1. Dynamically load symbol -> sector mapping from Wikipedia's S&P 500 list
 
 
 def load_sector_lookup() -> Dict[str, str]:
@@ -26,136 +28,153 @@ def load_sector_lookup() -> Dict[str, str]:
         Dict mapping ticker symbol -> GICS sector string.
     """
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    # Read all tables; the first table is the constituents list
     df_list = pd.read_html(url)
     df = df_list[0]
-    # Ensure the Symbol column matches our ticker format (remove dots)
     df['Symbol'] = df['Symbol'].str.replace('.', '-', regex=False).str.strip()
-    # Create mapping
     return dict(zip(df['Symbol'], df['GICS Sector']))
 
 
-# Initialize sector lookup once\ n
+# Load sector lookup once at module import
 SECTOR_LOOKUP = load_sector_lookup()
 
 
 def compute_ticker_sentiment(
-    ticker_chunks: List[Tuple[str, str, float]]
+    ticker_chunks: List[Tuple[str, str, float]],
+    method: str = "majority",
+    threshold: float = 0.2
 ) -> Dict[str, Dict]:
     """
     Aggregate chunk-level sentiment for each ticker.
 
     Args:
-        ticker_chunks: list of tuples (ticker, label, confidence)
-                         where label in {'Positive','Neutral','Negative'}.
+        ticker_chunks: list of (ticker, label, confidence)
+        method: one of "default", "majority", "conf_weighted"
+        threshold: Neutral cutoff for score in "default" or "conf_weighted"
 
     Returns:
-        Dict mapping ticker -> {
-            'score': float ([-1,1] weighted sentiment),
-            'label': str (final label),
-            'confidence': float (average confidence)
-        }
+        Dict mapping ticker -> {score, label, confidence_avg}
     """
-    ticker_data = defaultdict(
-        lambda: {'pos': 0.0, 'neg': 0.0, 'neu': 0.0, 'conf_sum': 0.0, 'count': 0})
+    data = defaultdict(lambda: {
+        'pos_count': 0, 'neg_count': 0, 'neu_count': 0,
+        'pos_conf': 0.0, 'neg_conf': 0.0, 'neu_conf': 0.0
+    })
     for ticker, label, conf in ticker_chunks:
-        data = ticker_data[ticker]
-        data['conf_sum'] += conf
-        data['count'] += 1
+        d = data[ticker]
         if label == 'Positive':
-            data['pos'] += 1
+            d['pos_count'] += 1
+            d['pos_conf'] += conf
         elif label == 'Negative':
-            data['neg'] += 1
+            d['neg_count'] += 1
+            d['neg_conf'] += conf
         else:
-            data['neu'] += 1
+            d['neu_count'] += 1
+            d['neu_conf'] += conf
 
     results = {}
-    for ticker, data in ticker_data.items():
-        pos, neg, neu = data['pos'], data['neg'], data['neu']
-        total = pos + neg + neu
-        score = (pos - neg) / total if total > 0 else 0.0
-        if score > 0.2:
-            label = 'Positive'
-        elif score < -0.2:
-            label = 'Negative'
-        else:
-            label = 'Neutral'
-        confidence = data['conf_sum'] / data['count']
+    for ticker, d in data.items():
+        pos, neg, neu = d['pos_count'], d['neg_count'], d['neu_count']
+        total_chunks = pos + neg + neu
+        total_conf = d['pos_conf'] + d['neg_conf'] + d['neu_conf']
+
+        if method == "majority":
+            if pos > neg and pos > neu:
+                label = 'Positive'
+            elif neg > pos and neg > neu:
+                label = 'Negative'
+            else:
+                label = 'Neutral'
+            score = (pos - neg) / total_chunks if total_chunks else 0.0
+
+        elif method == "conf_weighted":
+            pos_c = d['pos_conf']
+            neg_c = d['neg_conf']
+            score = ((pos_c - neg_c) / total_conf) if total_conf else 0.0
+            if score > threshold:
+                label = 'Positive'
+            elif score < -threshold:
+                label = 'Negative'
+            else:
+                label = 'Neutral'
+
+        else:  # default
+            score = (pos - neg) / total_chunks if total_chunks else 0.0
+            if score > threshold:
+                label = 'Positive'
+            elif score < -threshold:
+                label = 'Negative'
+            else:
+                label = 'Neutral'
+
+        avg_conf = total_conf / total_chunks if total_chunks else 0.0
         results[ticker] = {'score': score,
-                           'label': label, 'confidence': confidence}
+                           'label': label, 'confidence': avg_conf}
     return results
 
 
 def compute_sector_sentiment(
-    ticker_sentiments: Dict[str, Dict]
+    ticker_sentiments: Dict[str, Dict],
+    threshold: float = 0.2
 ) -> Dict[str, Dict]:
     """
     Aggregate ticker-level sentiments into sector-level.
 
     Args:
-        ticker_sentiments: mapping ticker -> {'score', 'label', 'confidence'}
+        ticker_sentiments: mapping ticker -> {'score','label','confidence'}
+        threshold: Neutral cutoff for avg_score
 
     Returns:
-        Dict mapping sector -> {
-            'score': float, 'label': str, 'confidence': float, 'weight': float
-        }
+        Dict mapping sector -> {score, label, confidence, weight}
     """
-    sector_data = defaultdict(
-        lambda: {'score_sum': 0.0, 'weight_sum': 0.0, 'conf_sum': 0.0})
+    agg = defaultdict(lambda: {'score_sum': 0.0, 'conf_sum': 0.0, 'count': 0})
     for ticker, info in ticker_sentiments.items():
         sector = SECTOR_LOOKUP.get(ticker, 'Unknown')
-        score = info['score']
-        conf = info['confidence']
-        weight = 1.0
-        sector_data[sector]['score_sum'] += score * weight
-        sector_data[sector]['weight_sum'] += weight
-        sector_data[sector]['conf_sum'] += conf * weight
+        agg[sector]['score_sum'] += info['score']
+        agg[sector]['conf_sum'] += info['confidence']
+        agg[sector]['count'] += 1
 
-    sector_results = {}
-    for sector, data in sector_data.items():
-        avg_score = data['score_sum'] / \
-            data['weight_sum'] if data['weight_sum'] else 0.0
-        avg_conf = data['conf_sum'] / \
-            data['weight_sum'] if data['weight_sum'] else 0.0
-        if avg_score > 0.2:
+    results = {}
+    for sector, d in agg.items():
+        cnt = d['count']
+        avg_score = d['score_sum'] / cnt if cnt else 0.0
+        avg_conf = d['conf_sum'] / cnt if cnt else 0.0
+        if avg_score > threshold:
             label = 'Positive'
-        elif avg_score < -0.2:
+        elif avg_score < -threshold:
             label = 'Negative'
         else:
             label = 'Neutral'
-        sector_results[sector] = {
-            'score': avg_score,
-            'label': label,
+        results[sector] = {
+            'score':      avg_score,
+            'label':      label,
             'confidence': avg_conf,
-            'weight': data['weight_sum']
+            'weight':     cnt
         }
-    return sector_results
+    return results
 
 
 def compute_article_sentiment(
-    ticker_sentiments: Dict[str, Dict]
+    ticker_sentiments: Dict[str, Dict],
+    threshold: float = 0.2
 ) -> Tuple[str, float]:
     """
     Compute overall article sentiment from ticker-level scores.
 
     Args:
-        ticker_sentiments: mapping ticker -> {'score', 'label', 'confidence'}
+        ticker_sentiments: mapping ticker -> {'score','label','confidence'}
+        threshold: Neutral cutoff for avg_score
 
     Returns:
-        (label, confidence) for the entire article.
+        (label, avg_confidence)
     """
     if not ticker_sentiments:
         return 'Neutral', 0.0
-    total, conf_sum = 0.0, 0.0
-    for info in ticker_sentiments.values():
-        total += info['score']
-        conf_sum += info['confidence']
-    count = len(ticker_sentiments)
-    avg_score = total / count
-    avg_conf = conf_sum / count
-    if avg_score > 0.2:
+    scores = [v['score'] for v in ticker_sentiments.values()]
+    confs = [v['confidence'] for v in ticker_sentiments.values()]
+    avg_score = sum(scores) / len(scores)
+    avg_conf = sum(confs) / len(confs)
+    if avg_score > threshold:
         label = 'Positive'
-    elif avg_score < -0.2:
+    elif avg_score < -threshold:
         label = 'Negative'
     else:
         label = 'Neutral'
@@ -163,16 +182,16 @@ def compute_article_sentiment(
 
 
 if __name__ == '__main__':
-    sample_chunks = [
-        ('AAPL', 'Positive', 0.95),
-        ('AAPL', 'Neutral', 0.80),
-        ('AAPL', 'Positive', 0.90),
-        ('MSFT', 'Negative', 0.85),
-        ('MSFT', 'Negative', 0.80)
+    sample = [
+        ('AAPL', 'Positive', 0.95), ('AAPL',
+                                     'Neutral', 0.8), ('AAPL', 'Positive', 0.9),
+        ('MSFT', 'Negative', 0.85), ('MSFT', 'Negative', 0.8)
     ]
-    ticker_res = compute_ticker_sentiment(sample_chunks)
-    print('Ticker-level:', ticker_res)
-    sector_res = compute_sector_sentiment(ticker_res)
-    print('Sector-level:', sector_res)
-    article_label, article_conf = compute_article_sentiment(ticker_res)
-    print('Article-level:', article_label, article_conf)
+    for m in ['default', 'majority', 'conf_weighted']:
+        print(f"--- method: {m}")
+        res = compute_ticker_sentiment(sample, method=m, threshold=0.1)
+        print("Ticker-level:", res)
+        sec = compute_sector_sentiment(res, threshold=0.1)
+        print("Sector-level:", sec)
+        art = compute_article_sentiment(res, threshold=0.1)
+        print("Article-level:", art)
