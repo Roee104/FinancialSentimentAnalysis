@@ -2,3 +2,5 @@
 .venv/
 # dotenv
 .env
+# Ignore large dataset files
+data/*.parquet
