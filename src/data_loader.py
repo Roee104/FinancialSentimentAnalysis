@@ -4,17 +4,15 @@ import time
 import requests
 import pandas as pd
 from transformers import AutoTokenizer, logging
-from dotenv import load_dotenv
 import os
 import json
 from datetime import datetime
 from typing import Dict, List, Optional
 
 # Load environment variables from .env file
-load_dotenv()
 
 # 1. Configuration
-API_TOKEN = os.getenv("EODHD_API_TOKEN")
+API_TOKEN = "68442677069401.89798760"
 BASE_URL = "https://eodhd.com/api/news"
 
 # Date range for articles
