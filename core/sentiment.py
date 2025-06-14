@@ -1,6 +1,6 @@
 # core/sentiment.py
 """
-Unified sentiment analysis module combining FinBERT with optimizations
+Fixed unified sentiment analysis module - using standard FinBERT with optional light optimization
 """
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 class UnifiedSentimentAnalyzer:
     """
     Unified sentiment analyzer with multiple modes:
-    - standard: Original FinBERT
-    - optimized: With bias correction
-    - calibrated: With advanced calibration
+    - standard: Original FinBERT (recommended)
+    - optimized: Light bias correction
+    - calibrated: Stronger calibration (use with caution)
     """
 
     def __init__(self,
-                 mode: str = "optimized",
+                 mode: str = "standard",  # Changed default to standard
                  model_name: str = None,
                  device: str = None,
                  **kwargs):
@@ -60,8 +60,8 @@ class UnifiedSentimentAnalyzer:
         self.model.to(self.device)
         self.model.eval()
 
-        # Label mapping
-        self.id2label = self.model.config.id2label
+        # Label mapping - CORRECT for yiyanghkust/finbert-tone
+        self.id2label = {0: "Neutral", 1: "Positive", 2: "Negative"}
         self.label2id = {v: k for k, v in self.id2label.items()}
 
         # Statistics tracking
@@ -89,7 +89,7 @@ class UnifiedSentimentAnalyzer:
                           texts: List[str],
                           batch_size: int = None,
                           max_length: int = None) -> List[Dict]:
-        """Standard FinBERT prediction"""
+        """Standard FinBERT prediction - no modifications"""
         batch_size = batch_size or self.config["batch_size"]
         max_length = max_length or self.config["max_length"]
 
@@ -114,17 +114,19 @@ class UnifiedSentimentAnalyzer:
                                      attention_mask=attention_mask)
                 logits = outputs.logits
                 probs = F.softmax(logits, dim=-1)
-                confidences, indices = torch.max(probs, dim=1)
 
                 # Build results
                 for idx, text in enumerate(batch):
-                    label_id = indices[idx].item()
-                    label = self.id2label[label_id].title()
-                    conf = confidences[idx].item()
+                    prob_values = probs[idx].cpu().numpy()
+                    predicted_class = prob_values.argmax()
+
+                    label = self.id2label[predicted_class]
+                    conf = float(prob_values[predicted_class])
 
                     score_dict = {
-                        self.id2label[j].title(): probs[idx][j].item()
-                        for j in range(probs.size(1))
+                        "Neutral": float(prob_values[0]),
+                        "Positive": float(prob_values[1]),
+                        "Negative": float(prob_values[2])
                     }
 
                     results.append({
@@ -140,7 +142,7 @@ class UnifiedSentimentAnalyzer:
                            texts: List[str],
                            batch_size: int = None,
                            max_length: int = None) -> List[Dict]:
-        """Optimized prediction with bias correction"""
+        """Optimized prediction with LIGHT bias correction"""
         batch_size = batch_size or self.config["batch_size"]
         max_length = max_length or self.config["max_length"]
 
@@ -162,54 +164,62 @@ class UnifiedSentimentAnalyzer:
                 outputs = self.model(input_ids=input_ids,
                                      attention_mask=attention_mask)
 
-                # Get original probabilities
-                original_probs = F.softmax(outputs.logits, dim=-1)
+                # Apply LIGHT correction to logits (not probabilities)
+                logits = outputs.logits
+                corrected_logits = self._apply_logit_correction(logits)
 
-                # Apply bias correction
-                corrected_probs = self._apply_bias_correction(original_probs)
+                # Get probabilities from corrected logits
+                corrected_probs = F.softmax(corrected_logits, dim=-1)
 
-                # Classify
+                # Build results
                 for idx, text in enumerate(batch):
-                    prob_neg = corrected_probs[idx][0].item()
-                    prob_neu = corrected_probs[idx][1].item()
-                    prob_pos = corrected_probs[idx][2].item()
+                    prob_values = corrected_probs[idx].cpu().numpy()
+                    predicted_class = prob_values.argmax()
 
-                    # Get original prediction for comparison
-                    orig_max_idx = torch.argmax(original_probs[idx]).item()
-                    original_label = ["Negative",
-                                      "Neutral", "Positive"][orig_max_idx]
+                    label = self.id2label[predicted_class]
+                    conf = float(prob_values[predicted_class])
 
-                    # Determine final classification
-                    label, confidence = self._classify_with_threshold(
-                        prob_neg, prob_neu, prob_pos
-                    )
-
-                    # Track changes
-                    if original_label != label:
-                        self.stats[f'changed_{original_label.lower()}_to_{label.lower()}'] += 1
+                    # Track if changed from original
+                    orig_class = outputs.logits[idx].argmax().item()
+                    if orig_class != predicted_class:
+                        self.stats[f'changed_{self.id2label[orig_class].lower()}_to_{label.lower()}'] += 1
 
                     score_dict = {
-                        "Negative": prob_neg,
-                        "Neutral": prob_neu,
-                        "Positive": prob_pos
+                        "Neutral": float(prob_values[0]),
+                        "Positive": float(prob_values[1]),
+                        "Negative": float(prob_values[2])
                     }
 
                     results.append({
                         "text": text,
                         "label": label,
-                        "confidence": confidence,
+                        "confidence": conf,
                         "scores": score_dict,
-                        "original_label": original_label,
-                        "bias_corrected": original_label != label
+                        "original_label": self.id2label[orig_class],
+                        "bias_corrected": orig_class != predicted_class
                     })
 
         return results
+
+    def _apply_logit_correction(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Apply LIGHT correction to logits to reduce neutral bias
+        Working with logits is more numerically stable than probabilities
+        """
+        corrected_logits = logits.clone()
+
+        # Light adjustments - index mapping: 0=Neutral, 1=Positive, 2=Negative
+        corrected_logits[:, 0] -= 0.2  # Slightly reduce neutral tendency
+        corrected_logits[:, 1] += 0.05  # Very slight boost to positive
+        corrected_logits[:, 2] += 0.05  # Very slight boost to negative
+
+        return corrected_logits
 
     def _predict_calibrated(self,
                             texts: List[str],
                             batch_size: int = None,
                             max_length: int = None) -> List[Dict]:
-        """Calibrated prediction with advanced bias reduction"""
+        """Calibrated prediction with stronger bias reduction"""
         batch_size = batch_size or self.config["batch_size"]
         max_length = max_length or self.config["max_length"]
 
@@ -231,130 +241,53 @@ class UnifiedSentimentAnalyzer:
                 outputs = self.model(input_ids=input_ids,
                                      attention_mask=attention_mask)
 
-                # Get original probabilities
-                original_probs = F.softmax(outputs.logits, dim=-1)
+                # Apply stronger correction
+                logits = outputs.logits
+                corrected_logits = logits.clone()
 
-                # Apply stronger bias correction
-                adjusted_probs = self._reduce_neutral_bias(original_probs)
+                # Stronger adjustments
+                corrected_logits[:, 0] -= 0.4  # Reduce neutral more
+                corrected_logits[:, 1] += 0.1  # Boost positive
+                corrected_logits[:, 2] += 0.1  # Boost negative
 
-                # Classify with confidence thresholding
-                classifications = self._classify_with_confidence_threshold(
-                    adjusted_probs)
+                corrected_probs = F.softmax(corrected_logits, dim=-1)
 
-                # Build results
-                for idx, (text, (label, confidence)) in enumerate(zip(batch, classifications)):
-                    # Get all probabilities
-                    prob_neg = adjusted_probs[idx][0].item()
-                    prob_neu = adjusted_probs[idx][1].item()
-                    prob_pos = adjusted_probs[idx][2].item()
+                # Build results with additional logic
+                for idx, text in enumerate(batch):
+                    prob_values = corrected_probs[idx].cpu().numpy()
 
-                    # Track original
-                    original_max_idx = torch.argmax(original_probs[idx]).item()
-                    original_label = ["Negative", "Neutral",
-                                      "Positive"][original_max_idx]
+                    # Apply minimum confidence difference requirement
+                    sorted_indices = prob_values.argsort()[::-1]
+                    top_prob = prob_values[sorted_indices[0]]
+                    second_prob = prob_values[sorted_indices[1]]
 
-                    if original_label != label:
-                        self.stats[f'changed_{original_label.lower()}_to_{label.lower()}'] += 1
+                    if (sorted_indices[0] != 0 and  # Not neutral
+                            top_prob - second_prob >= self.config["min_confidence_diff"]):
+                        predicted_class = sorted_indices[0]
+                    elif (sorted_indices[1] != 0 and
+                          second_prob - prob_values[0] >= self.config["min_confidence_diff"]):
+                        predicted_class = sorted_indices[1]
+                    else:
+                        predicted_class = 0  # Default to neutral
+
+                    label = self.id2label[predicted_class]
+                    conf = float(prob_values[predicted_class])
+
+                    self.stats[f'{label.lower()}_classified'] += 1
 
                     score_dict = {
-                        "Negative": prob_neg,
-                        "Neutral": prob_neu,
-                        "Positive": prob_pos
+                        "Neutral": float(prob_values[0]),
+                        "Positive": float(prob_values[1]),
+                        "Negative": float(prob_values[2])
                     }
 
                     results.append({
                         "text": text,
                         "label": label,
-                        "confidence": confidence,
+                        "confidence": conf,
                         "scores": score_dict,
-                        "original_label": original_label,
-                        "calibrated": original_label != label
+                        "calibrated": True
                     })
-
-        return results
-
-    def _apply_bias_correction(self, probs: torch.Tensor) -> torch.Tensor:
-        """Apply optimized bias correction"""
-        corrected_probs = probs.clone()
-
-        # Apply corrections from config
-        corrected_probs[:, 0] *= self.config["neg_boost"]    # Negative
-        corrected_probs[:, 1] *= self.config["neutral_penalty"]  # Neutral
-        corrected_probs[:, 2] *= self.config["pos_boost"]    # Positive
-
-        # Renormalize
-        corrected_probs = F.softmax(corrected_probs, dim=1)
-
-        return corrected_probs
-
-    def _reduce_neutral_bias(self, probs: torch.Tensor) -> torch.Tensor:
-        """Apply stronger neutral bias reduction for calibrated mode"""
-        adjusted_probs = probs.clone()
-
-        # Stronger reduction
-        adjusted_probs[:, 1] *= self.config["neutral_penalty"]
-        adjusted_probs[:, 0] *= self.config["neg_boost"]
-        adjusted_probs[:, 2] *= self.config["pos_boost"]
-
-        # Renormalize
-        adjusted_probs = F.softmax(adjusted_probs, dim=1)
-
-        return adjusted_probs
-
-    def _classify_with_threshold(self, prob_neg: float, prob_neu: float,
-                                 prob_pos: float) -> Tuple[str, float]:
-        """Classify with confidence threshold"""
-        threshold = self.config["min_confidence_diff"]
-
-        if prob_pos > prob_neg and prob_pos > prob_neu:
-            if prob_pos - max(prob_neg, prob_neu) >= threshold:
-                return "Positive", prob_pos
-            else:
-                return "Neutral", prob_neu
-        elif prob_neg > prob_pos and prob_neg > prob_neu:
-            if prob_neg - max(prob_pos, prob_neu) >= threshold:
-                return "Negative", prob_neg
-            else:
-                return "Neutral", prob_neu
-        else:
-            return "Neutral", prob_neu
-
-    def _classify_with_confidence_threshold(self, probs: torch.Tensor) -> List[Tuple[str, float]]:
-        """Classify batch with confidence thresholding"""
-        results = []
-
-        for i in range(probs.size(0)):
-            prob_neg = probs[i][0].item()
-            prob_neu = probs[i][1].item()
-            prob_pos = probs[i][2].item()
-
-            # Sort probabilities
-            sorted_probs = sorted([
-                ('Negative', prob_neg),
-                ('Neutral', prob_neu),
-                ('Positive', prob_pos)
-            ], key=lambda x: x[1], reverse=True)
-
-            top_label, top_prob = sorted_probs[0]
-            second_label, second_prob = sorted_probs[1]
-
-            # Check confidence difference
-            confidence_diff = top_prob - second_prob
-
-            if (top_label != 'Neutral' and
-                    confidence_diff >= self.config["min_confidence_diff"]):
-                final_label = top_label
-                final_confidence = top_prob
-            elif (second_label != 'Neutral' and
-                  (top_prob - prob_neu) >= self.config["min_confidence_diff"]):
-                final_label = second_label
-                final_confidence = second_prob
-            else:
-                final_label = 'Neutral'
-                final_confidence = prob_neu
-
-            results.append((final_label, final_confidence))
-            self.stats[f'{final_label.lower()}_classified'] += 1
 
         return results
 
@@ -374,10 +307,10 @@ def create_finbert_analyzer(**kwargs) -> UnifiedSentimentAnalyzer:
 
 
 def create_optimized_analyzer(**kwargs) -> UnifiedSentimentAnalyzer:
-    """Create optimized analyzer with bias correction"""
+    """Create optimized analyzer with light bias correction"""
     return UnifiedSentimentAnalyzer(mode="optimized", **kwargs)
 
 
 def create_calibrated_analyzer(**kwargs) -> UnifiedSentimentAnalyzer:
-    """Create calibrated analyzer with advanced bias reduction"""
+    """Create calibrated analyzer with stronger bias reduction"""
     return UnifiedSentimentAnalyzer(mode="calibrated", **kwargs)

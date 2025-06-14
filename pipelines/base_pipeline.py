@@ -1,6 +1,6 @@
 # pipelines/base_pipeline.py
 """
-Base pipeline class for financial sentiment analysis
+Fixed base pipeline with context-aware sentiment assignment
 """
 
 import json
@@ -19,10 +19,6 @@ from config.settings import (
     INPUT_PARQUET, PROCESSED_OUTPUT, MASTER_TICKER_LIST,
     PIPELINE_CONFIG, TEXT_PROCESSING
 )
-from core.sentiment import UnifiedSentimentAnalyzer
-from core.ner import UnifiedNER
-from core.text_processor import TextProcessor
-from core.aggregator import Aggregator
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +60,9 @@ class BasePipeline(ABC):
         self.text_processor = None
         self.aggregator = None
 
+        # Load ticker to company mapping
+        self.ticker_to_company = self._load_ticker_to_company()
+
         # Statistics
         self.stats = {
             'processed': 0,
@@ -72,7 +71,8 @@ class BasePipeline(ABC):
             'sentiment_dist': {'Positive': 0, 'Neutral': 0, 'Negative': 0},
             'articles_with_tickers': 0,
             'articles_without_tickers': 0,
-            'total_tickers_found': 0
+            'total_tickers_found': 0,
+            'total_chunks_assigned': 0
         }
 
         # Resume tracking
@@ -80,6 +80,19 @@ class BasePipeline(ABC):
         self.processed_count = 0
 
         logger.info(f"Initialized {self.__class__.__name__}")
+
+    def _load_ticker_to_company(self) -> Dict[str, str]:
+        """Load ticker to company name mapping"""
+        try:
+            if self.ticker_csv.exists():
+                df = pd.read_csv(self.ticker_csv, dtype=str)
+                mapping = dict(
+                    zip(df['symbol'].str.upper(), df['company_name']))
+                logger.info(f"Loaded {len(mapping)} ticker-company mappings")
+                return mapping
+        except Exception as e:
+            logger.warning(f"Could not load ticker-company mapping: {e}")
+        return {}
 
     @abstractmethod
     def initialize_components(self):
@@ -121,7 +134,7 @@ class BasePipeline(ABC):
 
     def process_article(self, row: pd.Series) -> Optional[Dict]:
         """
-        Process a single article
+        Process a single article with context-aware sentiment assignment
 
         Args:
             row: DataFrame row containing article data
@@ -150,7 +163,7 @@ class BasePipeline(ABC):
 
             full_text = f"{title}\n\n{content}"
 
-            # Process text
+            # Process text into chunks
             chunks = self.text_processor.split_to_chunks(full_text)
             if not chunks:
                 return None
@@ -175,21 +188,26 @@ class BasePipeline(ABC):
             else:
                 self.stats['articles_without_tickers'] += 1
 
-            # Get sentiment predictions
+            # Get sentiment predictions for chunks
             predictions = self.sentiment_analyzer.predict(
                 chunks,
                 batch_size=self.config.get("sentiment_batch_size", 8)
             )
 
-            # Aggregate results
+            # Context-aware aggregation
             result = self.aggregator.aggregate_article(
                 chunks=chunks,
                 predictions=predictions,
-                symbols=symbols
+                symbols=symbols,
+                ticker_to_company=self.ticker_to_company
             )
 
             # Update sentiment stats
             self.stats['sentiment_dist'][result['overall_sentiment']] += 1
+
+            # Track chunk assignments
+            total_assigned = sum(result['chunk_assignments'].values())
+            self.stats['total_chunks_assigned'] += total_assigned
 
             # Build final record
             record = {
@@ -201,7 +219,8 @@ class BasePipeline(ABC):
                 "tickers": result['ticker_sentiments'],
                 "sectors": result['sector_sentiments'],
                 "ticker_count": len(symbols),
-                "chunk_count": len(chunks)
+                "chunk_count": len(chunks),
+                "chunks_assigned": result['chunk_assignments']
             }
 
             return record
@@ -305,6 +324,13 @@ class BasePipeline(ABC):
             logger.info(
                 f"Recent sentiment: {dict(self.stats['sentiment_dist'])}")
 
+            # Show chunk assignment rate
+            if self.stats['total_chunks_assigned'] > 0:
+                avg_assigned = self.stats['total_chunks_assigned'] / \
+                    self.stats['processed']
+                logger.info(
+                    f"Average chunks assigned per article: {avg_assigned:.1f}")
+
     def _print_final_report(self):
         """Print final statistics"""
         print("\n" + "="*50)
@@ -329,6 +355,12 @@ class BasePipeline(ABC):
                   f"({self.stats['articles_with_tickers']/total*100:.1f}%)")
             print(f"  Average tickers/article: " +
                   f"{self.stats['total_tickers_found']/total:.2f}")
+
+            print(f"\nContext-Aware Assignment:")
+            print(
+                f"  Total chunks assigned: {self.stats['total_chunks_assigned']}")
+            print(f"  Average chunks assigned/article: " +
+                  f"{self.stats['total_chunks_assigned']/total:.2f}")
 
         # NER stats
         if self.ner:
