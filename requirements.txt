@@ -87,6 +87,7 @@ typing-inspection==0.4.1
 typing_extensions==4.14.0
 tzdata==2025.2
 urllib3==2.4.0
+vaderSentiment==3.3.2
 wcwidth==0.2.13
 websockets==15.0.1
 yfinance==0.2.63
