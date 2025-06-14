@@ -1,6 +1,41 @@
 # virtual env
 .venv/
+
 # dotenv
 .env
+
 # Ignore large dataset files
 data/*.parquet
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files (too large for GitHub)
+data/*.parquet
+data/financial_news_2020_2025_100k.parquet
+data/processed_articles*.jsonl
+data/outputs/
+data/checkpoints/
+
+# Results (optional - you may want to keep some)
+data/plots/*.png
+data/*.csv
+data/results/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
