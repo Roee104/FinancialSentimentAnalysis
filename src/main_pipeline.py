@@ -1,4 +1,4 @@
-# src/pipeline_updated.py
+# src/main_pipeline.py
 
 """
 Updated pipeline with Enhanced NER and improved aggregation.
@@ -7,6 +7,8 @@ Uses frozen FinBERT but with better ticker extraction and aggregation.
 
 import json
 import pandas as pd
+import numpy as np  # Added for array handling
+import gc  # Added for memory management
 from tqdm import tqdm
 
 from splitter import split_to_chunks
@@ -15,12 +17,34 @@ from aggregator import compute_ticker_sentiment, compute_sector_sentiment, compu
 from ner import EnhancedNER, get_enhanced_symbols
 
 
+def handle_symbols(symbols_raw):
+    """Convert symbols to list format, handling numpy arrays"""
+    if symbols_raw is None:
+        return []
+    elif isinstance(symbols_raw, np.ndarray):
+        return symbols_raw.tolist()
+    elif isinstance(symbols_raw, list):
+        return symbols_raw
+    elif isinstance(symbols_raw, str):
+        if symbols_raw.startswith('[') and symbols_raw.endswith(']'):
+            try:
+                return eval(symbols_raw)
+            except:
+                return []
+        return [symbols_raw] if symbols_raw else []
+    elif pd.isna(symbols_raw):
+        return []
+    else:
+        return []
+
+
 def main(
     input_path: str = "data/financial_news_2020_2025_100k.parquet",
     output_path: str = "data/processed_articles.jsonl",
     ticker_csv: str = "data/master_ticker_list.csv",
     method: str = "conf_weighted",
-    threshold: float = 0.1
+    threshold: float = 0.1,
+    batch_size: int = None  # Added for batch processing
 ):
     """
     Updated pipeline with enhanced NER and configurable aggregation.
@@ -31,11 +55,14 @@ def main(
         ticker_csv: Master ticker list CSV
         method: Aggregation method (default, majority, conf_weighted)
         threshold: Threshold for sentiment classification
+        batch_size: Optional batch size for processing
     """
 
     print(f"🚀 Starting Enhanced Pipeline")
     print(f"   Method: {method}")
     print(f"   Threshold: {threshold}")
+    if batch_size:
+        print(f"   Batch size: {batch_size}")
     print("=" * 50)
 
     # 1. Initialize Enhanced NER
@@ -62,7 +89,7 @@ def main(
 
     # 5. Process articles
     with open(output_path, "w", encoding="utf-8") as fout:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing articles"):
+        for idx, (_, row) in enumerate(tqdm(df.iterrows(), total=len(df), desc="Processing articles")):
             stats['total_articles'] += 1
 
             date = row.get("date")
@@ -76,10 +103,14 @@ def main(
                 continue
 
             # 5.2 Extract tickers using Enhanced NER
+            # Handle symbols array properly
+            raw_symbols = row.get("symbols", [])
+            symbols_list = handle_symbols(raw_symbols)
+
             article_dict = {
                 "title": title,
                 "content": content,
-                "symbols": row.get("symbols", [])
+                "symbols": symbols_list
             }
 
             # Get enhanced symbols (handles exchange suffixes)
@@ -142,6 +173,10 @@ def main(
             # 5.7 Write JSON line
             fout.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+            # Memory cleanup every 1000 articles
+            if idx > 0 and idx % 1000 == 0:
+                gc.collect()
+
     # 6. Print statistics
     print("\n" + "="*50)
     print("📊 PIPELINE STATISTICS")
@@ -184,12 +219,28 @@ if __name__ == "__main__":
                         help="Input parquet file")
     parser.add_argument("--output", type=str, default="data/processed_articles.jsonl",
                         help="Output JSONL file")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Batch size for processing (for memory efficiency)")
+    parser.add_argument("--max-articles", type=int, default=None,
+                        help="Maximum number of articles to process")
 
     args = parser.parse_args()
 
+    # Handle max articles
+    if args.max_articles:
+        df = pd.read_parquet(args.input, engine="pyarrow")
+        df = df.head(args.max_articles)
+        temp_file = args.input.replace(
+            '.parquet', f'_temp_{args.max_articles}.parquet')
+        df.to_parquet(temp_file, index=False)
+        input_path = temp_file
+    else:
+        input_path = args.input
+
     main(
-        input_path=args.input,
+        input_path=input_path,
         output_path=args.output,
         method=args.method,
-        threshold=args.threshold
+        threshold=args.threshold,
+        batch_size=args.batch_size
     )

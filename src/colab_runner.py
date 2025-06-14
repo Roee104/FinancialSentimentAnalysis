@@ -153,18 +153,18 @@ def main():
 
     # Run experiments
     experiments = [
-        # 1. Original pipeline (optimized version)
-        ("src/pipeline_optimized.py",
+        # 1. Main pipeline (with batch processing)
+        ("src/main_pipeline.py",
          f"--batch-size {batch_size} --max-articles 5000",
-         "Original Pipeline (Baseline)"),
+         "Main Pipeline"),
 
         # 2. VADER baseline
         ("src/vader_baseline.py",
          "--threshold 0.05",
          "VADER Baseline"),
 
-        # 3. Enhanced pipeline
-        ("src/pipeline_updated.py",
+        # 3. Enhanced settings
+        ("src/main_pipeline.py",
          f"--output data/processed_articles_enhanced.jsonl",
          "Enhanced Pipeline"),
     ]
