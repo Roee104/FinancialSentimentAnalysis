@@ -7,6 +7,7 @@ import json
 import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
+from sklearn.utils import resample
 from typing import Dict, List, Tuple, Optional
 import logging
 from pathlib import Path
@@ -27,17 +28,21 @@ class SentimentEvaluator:
     def evaluate_predictions(self,
                              y_true: List[str],
                              y_pred: List[str],
-                             name: str = "Model") -> Dict:
+                             name: str = "Model",
+                             n_bootstrap: int = 100,
+                             confidence_level: float = 0.95) -> Dict:
         """
-        Evaluate sentiment predictions
+        Evaluate sentiment predictions with bootstrap confidence intervals
 
         Args:
             y_true: True labels
             y_pred: Predicted labels
             name: Model name
+            n_bootstrap: Number of bootstrap samples
+            confidence_level: Confidence level for intervals
 
         Returns:
-            Dictionary of metrics
+            Dictionary of metrics with confidence intervals
         """
         # Overall accuracy
         accuracy = accuracy_score(y_true, y_pred)
@@ -49,6 +54,7 @@ class SentimentEvaluator:
         )
 
         # Macro averages
+        # Macro averages
         macro_precision = np.mean(precision)
         macro_recall = np.mean(recall)
         macro_f1 = np.mean(f1)
@@ -56,13 +62,22 @@ class SentimentEvaluator:
         # Confusion matrix
         cm = confusion_matrix(y_true, y_pred, labels=labels)
 
+        # Bootstrap confidence intervals
+        if n_bootstrap > 0:
+            ci_metrics = self._bootstrap_metrics(
+                y_true, y_pred, labels, n_bootstrap, confidence_level
+            )
+        else:
+            ci_metrics = {}
+
         metrics = {
             'name': name,
             'accuracy': accuracy,
             'macro_precision': macro_precision,
             'macro_recall': macro_recall,
             'macro_f1': macro_f1,
-            'per_class': {}
+            'per_class': {},
+            'confidence_intervals': ci_metrics
         }
 
         # Per-class metrics
@@ -79,10 +94,90 @@ class SentimentEvaluator:
         self.metrics[name] = metrics
         return metrics
 
+    def _bootstrap_metrics(self,
+                           y_true: List[str],
+                           y_pred: List[str],
+                           labels: List[str],
+                           n_bootstrap: int,
+                           confidence_level: float) -> Dict:
+        """
+        Calculate bootstrap confidence intervals for metrics
+
+        Args:
+            y_true: True labels
+            y_pred: Predicted labels
+            labels: Label list
+            n_bootstrap: Number of bootstrap samples
+            confidence_level: Confidence level
+
+        Returns:
+            Dict with confidence intervals
+        """
+        n_samples = len(y_true)
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+
+        # Store bootstrap results
+        accuracies = []
+        macro_f1s = []
+        per_class_f1s = {label: [] for label in labels}
+
+        # Bootstrap sampling
+        for _ in range(n_bootstrap):
+            # Sample with replacement
+            indices = resample(range(n_samples), n_samples=n_samples)
+            y_true_boot = y_true[indices]
+            y_pred_boot = y_pred[indices]
+
+            # Calculate metrics
+            acc = accuracy_score(y_true_boot, y_pred_boot)
+            accuracies.append(acc)
+
+            _, _, f1, _ = precision_recall_fscore_support(
+                y_true_boot, y_pred_boot, labels=labels, average=None, zero_division=0
+            )
+            macro_f1s.append(np.mean(f1))
+
+            for i, label in enumerate(labels):
+                per_class_f1s[label].append(f1[i])
+
+        # Calculate confidence intervals
+        alpha = 1 - confidence_level
+        lower_percentile = (alpha / 2) * 100
+        upper_percentile = (1 - alpha / 2) * 100
+
+        ci_results = {
+            'accuracy': {
+                'mean': np.mean(accuracies),
+                'std': np.std(accuracies),
+                'ci_lower': np.percentile(accuracies, lower_percentile),
+                'ci_upper': np.percentile(accuracies, upper_percentile)
+            },
+            'macro_f1': {
+                'mean': np.mean(macro_f1s),
+                'std': np.std(macro_f1s),
+                'ci_lower': np.percentile(macro_f1s, lower_percentile),
+                'ci_upper': np.percentile(macro_f1s, upper_percentile)
+            },
+            'per_class_f1': {}
+        }
+
+        for label in labels:
+            f1_values = per_class_f1s[label]
+            ci_results['per_class_f1'][label] = {
+                'mean': np.mean(f1_values),
+                'std': np.std(f1_values),
+                'ci_lower': np.percentile(f1_values, lower_percentile),
+                'ci_upper': np.percentile(f1_values, upper_percentile)
+            }
+
+        return ci_results
+
     def evaluate_against_gold_standard(self,
                                        predictions_file: Path,
                                        gold_standard_file: Path,
-                                       name: str = "Model") -> Dict:
+                                       name: str = "Model",
+                                       n_bootstrap: int = 100) -> Dict:
         """
         Evaluate predictions against gold standard annotations
 
@@ -90,6 +185,7 @@ class SentimentEvaluator:
             predictions_file: Path to predictions JSONL
             gold_standard_file: Path to gold standard JSONL
             name: Model name
+            n_bootstrap: Number of bootstrap samples
 
         Returns:
             Evaluation metrics
@@ -101,8 +197,8 @@ class SentimentEvaluator:
         with open(predictions_file, 'r') as f:
             for line in f:
                 data = json.loads(line)
-                # Use article ID or title as key
-                key = data.get('article_id', data.get('title'))
+                # Use article hash if available, otherwise use title
+                key = data.get('article_hash', data.get('title'))
                 predictions[key] = data.get('overall_sentiment')
 
         # Load gold standard
@@ -110,7 +206,7 @@ class SentimentEvaluator:
         with open(gold_standard_file, 'r') as f:
             for line in f:
                 data = json.loads(line)
-                key = data.get('article_id', data.get('title'))
+                key = data.get('article_hash', data.get('title'))
                 gold_standard[key] = data.get('true_overall')
 
         # Find common articles
@@ -129,15 +225,87 @@ class SentimentEvaluator:
             y_true.append(gold_standard[key])
             y_pred.append(predictions[key])
 
-        # Evaluate
-        return self.evaluate_predictions(y_true, y_pred, name)
+        # Evaluate with bootstrap
+        return self.evaluate_predictions(y_true, y_pred, name, n_bootstrap)
+
+    def cross_validate(self,
+                       data_file: Path,
+                       pipeline_func,
+                       n_folds: int = 5,
+                       stratified: bool = True) -> Dict:
+        """
+        Perform cross-validation
+
+        Args:
+            data_file: Path to data file
+            pipeline_func: Function that creates and runs pipeline
+            n_folds: Number of folds
+            stratified: Whether to use stratified splits
+
+        Returns:
+            Cross-validation results
+        """
+        from sklearn.model_selection import StratifiedKFold, KFold
+
+        logger.info(f"Starting {n_folds}-fold cross-validation")
+
+        # Load data
+        df = pd.read_parquet(data_file)
+
+        # Get labels
+        if 'sentiment_label' in df.columns:
+            labels = df['sentiment_label'].values
+        else:
+            logger.error("No sentiment labels found in data")
+            return {}
+
+        # Create folds
+        if stratified:
+            kfold = StratifiedKFold(
+                n_splits=n_folds, shuffle=True, random_state=42)
+        else:
+            kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+        fold_results = []
+
+        for fold_idx, (train_idx, test_idx) in enumerate(kfold.split(df, labels)):
+            logger.info(f"Processing fold {fold_idx + 1}/{n_folds}")
+
+            # Split data
+            train_df = df.iloc[train_idx]
+            test_df = df.iloc[test_idx]
+
+            # Run pipeline on train and evaluate on test
+            # This is a simplified version - actual implementation would need
+            # to handle temporary files and pipeline execution
+            fold_metrics = {
+                'fold': fold_idx + 1,
+                'train_size': len(train_df),
+                'test_size': len(test_df)
+            }
+
+            fold_results.append(fold_metrics)
+
+        return {
+            'n_folds': n_folds,
+            'fold_results': fold_results,
+            'average_metrics': self._average_fold_metrics(fold_results)
+        }
+
+    def _average_fold_metrics(self, fold_results: List[Dict]) -> Dict:
+        """Average metrics across folds"""
+        # Simplified - would aggregate actual metrics
+        return {
+            'avg_train_size': np.mean([f['train_size'] for f in fold_results]),
+            'avg_test_size': np.mean([f['test_size'] for f in fold_results])
+        }
 
     def compare_models(self, model_results: Dict[str, Dict]) -> pd.DataFrame:
         """
         Compare multiple model results
 
         Args:
-            model_results: Dict mapping model names to result files
+            model_results: Dict mapping model names to metrics
 
         Returns:
             Comparison DataFrame
@@ -153,6 +321,15 @@ class SentimentEvaluator:
                 'Neutral F1': metrics['per_class']['Neutral']['f1'],
                 'Negative F1': metrics['per_class']['Negative']['f1']
             }
+
+            # Add confidence intervals if available
+            if 'confidence_intervals' in metrics:
+                ci = metrics['confidence_intervals']
+                if 'accuracy' in ci:
+                    row['Accuracy CI'] = f"[{ci['accuracy']['ci_lower']*100:.1f}, {ci['accuracy']['ci_upper']*100:.1f}]"
+                if 'macro_f1' in ci:
+                    row['Macro F1 CI'] = f"[{ci['macro_f1']['ci_lower']:.3f}, {ci['macro_f1']['ci_upper']:.3f}]"
+
             comparison_data.append(row)
 
         df = pd.DataFrame(comparison_data)
@@ -226,9 +403,9 @@ class SentimentEvaluator:
             false_negatives = 0
 
             for result in results:
-                article_id = result.get('title')  # or use proper ID
+                article_hash = result.get('article_hash', result.get('title'))
                 extracted = set(t['symbol'] for t in result.get('tickers', []))
-                expected = set(expected_tickers.get(article_id, []))
+                expected = set(expected_tickers.get(article_hash, []))
 
                 true_positives += len(extracted & expected)
                 false_positives += len(extracted - expected)
@@ -253,13 +430,15 @@ class SentimentEvaluator:
 
     def generate_evaluation_report(self,
                                    results_files: Dict[str, Path],
-                                   gold_standard_file: Optional[Path] = None) -> str:
+                                   gold_standard_file: Optional[Path] = None,
+                                   output_file: Optional[Path] = None) -> str:
         """
         Generate comprehensive evaluation report
 
         Args:
             results_files: Dict mapping model names to result files
             gold_standard_file: Optional gold standard for evaluation
+            output_file: Optional path to save report
 
         Returns:
             Report string
@@ -301,12 +480,19 @@ class SentimentEvaluator:
             # If gold standard available
             if gold_standard_file and gold_standard_file.exists():
                 eval_metrics = self.evaluate_against_gold_standard(
-                    results_file, gold_standard_file, model_name
+                    results_file, gold_standard_file, model_name, n_bootstrap=100
                 )
                 if eval_metrics:
                     report.append(
                         f"Accuracy: {eval_metrics['accuracy']*100:.1f}%")
                     report.append(f"Macro F1: {eval_metrics['macro_f1']:.3f}")
+
+                    # Add confidence intervals
+                    if 'confidence_intervals' in eval_metrics:
+                        ci = eval_metrics['confidence_intervals']['accuracy']
+                        report.append(
+                            f"Accuracy 95% CI: [{ci['ci_lower']*100:.1f}%, {ci['ci_upper']*100:.1f}%]")
+
                     all_metrics[model_name] = eval_metrics
 
         # Comparison table if multiple models evaluated
@@ -318,17 +504,26 @@ class SentimentEvaluator:
             comparison_df = self.compare_models(all_metrics)
             report.append("\n" + comparison_df.to_string(index=False))
 
-        return "\n".join(report)
+        report_text = "\n".join(report)
+
+        # Save if output file specified
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(report_text)
+            logger.info(f"Report saved to {output_file}")
+
+        return report_text
 
 
 # Convenience functions
 def evaluate_model(results_file: Path,
                    gold_standard_file: Path,
-                   model_name: str = "Model") -> Dict:
+                   model_name: str = "Model",
+                   n_bootstrap: int = 100) -> Dict:
     """Evaluate a single model against gold standard"""
     evaluator = SentimentEvaluator()
     return evaluator.evaluate_against_gold_standard(
-        results_file, gold_standard_file, model_name
+        results_file, gold_standard_file, model_name, n_bootstrap
     )
 
 

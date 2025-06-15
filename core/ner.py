@@ -10,6 +10,9 @@ from typing import Dict, List, Set, Tuple, Union, Optional
 import logging
 from collections import defaultdict
 from pathlib import Path
+import functools
+import spacy
+from spacy.matcher import PhraseMatcher
 
 from config.settings import (
     MASTER_TICKER_LIST, NER_CONFIG, EXCLUDED_WORDS,
@@ -18,20 +21,25 @@ from config.settings import (
 
 logger = logging.getLogger(__name__)
 
-# Regex patterns for ticker detection
+# Singleton cache for symbol dictionary
+_SYMBOL_CACHE = {}
+
+# Updated regex patterns for ticker detection
 TICKER_PATTERN = re.compile(r"\b[A-Z]{1,5}\b")
-PARENTHETICAL_PATTERN = re.compile(r"\(([A-Z]{1,5})\)")
+MULTI_WORD_TICKER_PATTERN = re.compile(
+    r"\b[A-Z]{1,5}(?:\.[A-Z])?\b")  # Handles BRK.B
+PARENTHETICAL_PATTERN = re.compile(r"\(([A-Z]{1,5}(?:\.[A-Z])?)\)")
 EXCHANGE_PATTERN = re.compile(
-    r"\b([A-Z]{2,5})(?:\s+(?:on|traded\s+on|listed\s+on)\s+(?:NYSE|NASDAQ|the\s+exchange))",
+    r"\b([A-Z]{2,5}(?:\.[A-Z])?)\s+(?:on|traded\s+on|listed\s+on)\s+(?:NYSE|NASDAQ|the\s+exchange)",
     re.IGNORECASE
 )
 STOCK_MENTION_PATTERN = re.compile(
-    r"\b([A-Z]{2,5})\s+(?:stock|shares|equity|securities)",
+    r"\b([A-Z]{2,5}(?:\.[A-Z])?)\s+(?:stock|shares|equity|securities)",
     re.IGNORECASE
 )
-PRICE_PATTERN = re.compile(r"\$([A-Z]{2,5})\b")
+PRICE_PATTERN = re.compile(r"\$([A-Z]{2,5}(?:\.[A-Z])?)\b")
 FINANCIAL_ACTION_PATTERN = re.compile(
-    r"(?:buy|sell|hold|upgrade|downgrade|target|rating)\s+([A-Z]{2,5})\b",
+    r"(?:buy|sell|hold|upgrade|downgrade|target|rating)\s+([A-Z]{2,5}(?:\.[A-Z])?)\b",
     re.IGNORECASE
 )
 
@@ -50,9 +58,22 @@ class UnifiedNER:
             ticker_csv_path: Path to master ticker list CSV
         """
         self.ticker_csv_path = Path(ticker_csv_path or MASTER_TICKER_LIST)
-        self.symbol_dict = self._load_symbol_list()
+
+        # Use cached symbol dict if available
+        cache_key = str(self.ticker_csv_path)
+        if cache_key in _SYMBOL_CACHE:
+            self.symbol_dict = _SYMBOL_CACHE[cache_key]
+            logger.debug(
+                f"Using cached symbol dictionary ({len(self.symbol_dict)} symbols)")
+        else:
+            self.symbol_dict = self._load_symbol_list()
+            _SYMBOL_CACHE[cache_key] = self.symbol_dict
+
         self.company_to_symbol = self._build_company_lookup()
         self.financial_context_pattern = self._build_context_pattern()
+
+        # Initialize spaCy components
+        self._init_spacy()
 
         # Configuration
         self.config = NER_CONFIG.copy()
@@ -61,6 +82,28 @@ class UnifiedNER:
         self.extraction_stats = defaultdict(int)
 
         logger.info(f"Initialized NER with {len(self.symbol_dict)} symbols")
+
+    def _init_spacy(self):
+        """Initialize spaCy NLP and PhraseMatcher"""
+        try:
+            self.nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
+            self.phrase_matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
+
+            # Add company names to phrase matcher
+            company_patterns = []
+            # Limit for performance
+            for company_name in list(self.company_to_symbol.keys())[:1000]:
+                doc = self.nlp(company_name)
+                company_patterns.append(doc)
+
+            if company_patterns:
+                self.phrase_matcher.add("COMPANY_NAMES", company_patterns)
+
+            logger.debug("Initialized spaCy components")
+        except Exception as e:
+            logger.warning(f"Failed to initialize spaCy: {e}")
+            self.nlp = None
+            self.phrase_matcher = None
 
     def _load_symbol_list(self) -> Dict[str, str]:
         """Load symbol->company mapping"""
@@ -80,26 +123,39 @@ class UnifiedNER:
             return {}
 
     def _build_company_lookup(self) -> Dict[str, str]:
-        """Build company_name->symbol lookup"""
+        """Build company_name->symbol lookup with better matching"""
         lookup = {}
         for symbol, company in self.symbol_dict.items():
             company_words = company.split()
-            if len(company_words) >= 2:
-                lookup[company] = symbol
 
-                # Add abbreviated versions
+            # Full company name
+            lookup[company] = symbol
+
+            # Company name without common suffixes
+            cleaned_company = re.sub(
+                r'\b(inc|corp|corporation|ltd|limited|plc|co|company)\b\.?', '', company, flags=re.IGNORECASE).strip()
+            if cleaned_company and cleaned_company != company:
+                lookup[cleaned_company] = symbol
+
+            # First 2-3 significant words
+            if len(company_words) >= 2:
+                short_name = " ".join(company_words[:2])
+                if len(short_name) > 5:  # Avoid too short names
+                    lookup[short_name] = symbol
+
                 if len(company_words) >= 3:
-                    short_name = " ".join(company_words[:2])
-                    if len(short_name) > 8:
-                        lookup[short_name] = symbol
+                    medium_name = " ".join(company_words[:3])
+                    if len(medium_name) > 8:
+                        lookup[medium_name] = symbol
 
         logger.info(f"Built company lookup with {len(lookup)} entries")
         return lookup
 
     def _build_context_pattern(self) -> re.Pattern:
         """Build regex pattern for financial contexts"""
-        context_pattern = "|".join(FINANCIAL_CONTEXTS)
-        return re.compile(f"({context_pattern})", re.IGNORECASE)
+        context_pattern = "|".join(re.escape(ctx)
+                                   for ctx in FINANCIAL_CONTEXTS)
+        return re.compile(f"\\b({context_pattern})\\b", re.IGNORECASE)
 
     def clean_symbol(self, symbol: str) -> str:
         """Remove exchange suffixes from symbols"""
@@ -112,10 +168,12 @@ class UnifiedNER:
     def normalize_symbols_list(self, symbols_list: List[str]) -> List[str]:
         """Clean and normalize a list of symbols"""
         normalized = []
+        seen = set()
         for symbol in symbols_list:
             clean_sym = self.clean_symbol(symbol)
-            if clean_sym and clean_sym not in normalized:
+            if clean_sym and clean_sym not in seen:
                 normalized.append(clean_sym)
+                seen.add(clean_sym)
         return normalized
 
     def handle_symbols_array(self, symbols_raw: Union[None, str, list, np.ndarray]) -> List[str]:
@@ -152,7 +210,7 @@ class UnifiedNER:
     def extract_symbols(self,
                         article: Dict,
                         min_confidence: float = None,
-                        use_metadata: bool = None) -> List[str]:
+                        use_metadata: bool = None) -> List[Tuple[str, float]]:
         """
         Main extraction method for symbols from article
 
@@ -162,13 +220,13 @@ class UnifiedNER:
             use_metadata: Whether to include metadata symbols
 
         Returns:
-            List of extracted and normalized symbols
+            List of (symbol, confidence) tuples
         """
         min_confidence = min_confidence or self.config["min_confidence"]
         use_metadata = use_metadata if use_metadata is not None else self.config[
             "use_metadata"]
 
-        all_symbols = set()
+        all_symbols = {}  # symbol -> max confidence
 
         # Handle metadata symbols
         if use_metadata:
@@ -176,7 +234,9 @@ class UnifiedNER:
                 article.get("symbols", []))
             if metadata_symbols:
                 clean_metadata = self.normalize_symbols_list(metadata_symbols)
-                all_symbols.update(clean_metadata)
+                for sym in clean_metadata:
+                    # High confidence for metadata
+                    all_symbols[sym] = max(all_symbols.get(sym, 0), 0.95)
                 self.extraction_stats['metadata'] += len(clean_metadata)
 
         # Extract from text
@@ -187,12 +247,15 @@ class UnifiedNER:
         if full_text.strip():
             text_symbols = self.extract_symbols_with_confidence(full_text)
 
-            # Filter by confidence
+            # Update with higher confidence
             for symbol, confidence in text_symbols:
                 if confidence >= min_confidence:
-                    all_symbols.add(symbol)
+                    all_symbols[symbol] = max(
+                        all_symbols.get(symbol, 0), confidence)
 
-        return sorted(list(all_symbols))
+        # Return as sorted list of tuples
+        return sorted([(sym, conf) for sym, conf in all_symbols.items()],
+                      key=lambda x: x[1], reverse=True)
 
     def extract_symbols_with_confidence(self, text: str) -> List[Tuple[str, float]]:
         """
@@ -204,32 +267,31 @@ class UnifiedNER:
         if not text or not isinstance(text, str):
             return []
 
+        results = {}  # symbol -> max confidence
+
         # Extract different categories
         high_conf = self._extract_high_confidence_tickers(text)
         medium_conf = self._extract_medium_confidence_tickers(text)
         company_mentions = self._extract_company_mentions(text)
         single_letter = self._extract_single_letter_tickers(text)
 
-        results = []
-
         # High confidence (0.9)
         for symbol in high_conf:
-            results.append((symbol, 0.9))
+            results[symbol] = max(results.get(symbol, 0), 0.9)
 
-        # Medium confidence (0.7) - only if not already in high
-        for symbol in medium_conf - high_conf:
-            results.append((symbol, 0.7))
+        # Medium confidence (0.7)
+        for symbol in medium_conf:
+            results[symbol] = max(results.get(symbol, 0), 0.7)
 
-        # Company mentions (0.8) - only if not already found
-        existing_symbols = {s for s, _ in results}
-        for symbol in company_mentions - existing_symbols:
-            results.append((symbol, 0.8))
+        # Company mentions (0.8)
+        for symbol in company_mentions:
+            results[symbol] = max(results.get(symbol, 0), 0.8)
 
-        # Single letter (0.6) - only if not already found
-        for symbol in single_letter - existing_symbols:
-            results.append((symbol, 0.6))
+        # Single letter (0.6)
+        for symbol in single_letter:
+            results[symbol] = max(results.get(symbol, 0), 0.6)
 
-        return results
+        return list(results.items())
 
     def _extract_high_confidence_tickers(self, text: str) -> Set[str]:
         """Extract tickers with high confidence signals"""
@@ -238,7 +300,7 @@ class UnifiedNER:
         # Parenthetical mentions
         for match in PARENTHETICAL_PATTERN.finditer(text):
             symbol = match.group(1).upper()
-            if self._is_valid_symbol(symbol) and len(symbol) > 1:
+            if self._is_valid_symbol(symbol):
                 clean_sym = self.clean_symbol(symbol)
                 high_conf.add(clean_sym)
                 self.extraction_stats['parenthetical'] += 1
@@ -281,11 +343,12 @@ class UnifiedNER:
         """Extract tickers with medium confidence"""
         medium_conf = set()
 
-        candidates = TICKER_PATTERN.findall(text)
+        # Use multi-word pattern for better coverage
+        candidates = MULTI_WORD_TICKER_PATTERN.findall(text)
 
         for candidate in candidates:
             candidate = candidate.upper()
-            if self._is_valid_symbol(candidate) and len(candidate) > 1:
+            if self._is_valid_symbol(candidate):
                 clean_sym = self.clean_symbol(candidate)
 
                 # Check financial context
@@ -293,15 +356,34 @@ class UnifiedNER:
                 if self._has_financial_context(context_window):
                     medium_conf.add(clean_sym)
                     self.extraction_stats['context_based'] += 1
-                elif len(candidate) >= 3:
+                elif len(clean_sym) >= 3:  # Longer tickers without explicit context
                     medium_conf.add(clean_sym)
                     self.extraction_stats['multi_letter'] += 1
 
         return medium_conf
 
     def _extract_company_mentions(self, text: str) -> Set[str]:
-        """Extract symbols based on company names"""
+        """Extract symbols based on company names using spaCy PhraseMatcher"""
         company_mentions = set()
+
+        if self.phrase_matcher and self.nlp:
+            try:
+                doc = self.nlp(text.lower())
+                matches = self.phrase_matcher(doc)
+
+                for match_id, start, end in matches:
+                    span = doc[start:end]
+                    company_text = span.text
+
+                    if company_text in self.company_to_symbol:
+                        symbol = self.company_to_symbol[company_text]
+                        company_mentions.add(symbol)
+                        self.extraction_stats['company_mention_spacy'] += 1
+
+            except Exception as e:
+                logger.debug(f"SpaCy matching error: {e}")
+
+        # Fallback to simple matching
         text_lower = text.lower()
 
         # Sort by length to avoid partial matches
@@ -309,14 +391,14 @@ class UnifiedNER:
             self.company_to_symbol.items(),
             key=lambda x: len(x[0]),
             reverse=True
-        )
+        )[:500]  # Limit for performance
 
         for company_name, symbol in sorted_companies:
-            if company_name in text_lower:
-                pattern = r'\b' + re.escape(company_name) + r'\b'
-                if re.search(pattern, text_lower):
-                    company_mentions.add(symbol)
-                    self.extraction_stats['company_mention'] += 1
+            # Use word boundaries for better matching
+            pattern = r'\b' + re.escape(company_name) + r'\b'
+            if re.search(pattern, text_lower):
+                company_mentions.add(symbol)
+                self.extraction_stats['company_mention'] += 1
 
         return company_mentions
 
@@ -375,6 +457,40 @@ class UnifiedNER:
         """Reset extraction statistics"""
         self.extraction_stats.clear()
 
+    # Unit tests
+    def test_ticker_extraction(self):
+        """Test ticker extraction functionality"""
+        test_cases = [
+            ("Apple (AAPL) stock rose 5%", [("AAPL", 0.9)]),
+            ("Buy MSFT shares on NYSE", [("MSFT", 0.9)]),
+            ("BRK.B trading at $350", [("BRK.B", 0.9)]),
+            ("Microsoft announced earnings", [
+             ("MSFT", 0.8)]) if "microsoft" in self.company_to_symbol else (None, []),
+        ]
+
+        passed = 0
+        for text, expected in test_cases:
+            if expected is None:
+                continue
+
+            article = {"title": text, "content": ""}
+            results = self.extract_symbols(article)
+
+            # Check if expected symbols are found
+            found_symbols = {sym for sym, _ in results}
+            expected_symbols = {sym for sym, _ in expected}
+
+            if expected_symbols.issubset(found_symbols):
+                passed += 1
+                logger.debug(f"✅ Test passed: '{text}' -> {results}")
+            else:
+                logger.warning(
+                    f"❌ Test failed: '{text}' -> {results}, expected {expected}")
+
+        logger.info(
+            f"Ticker extraction tests: {passed}/{len([e for _, e in test_cases if e is not None])} passed")
+        return passed == len([e for _, e in test_cases if e is not None])
+
 
 # Convenience function for backward compatibility
 def get_enhanced_symbols(article: dict,
@@ -382,7 +498,7 @@ def get_enhanced_symbols(article: dict,
                          min_confidence: float = 0.6,
                          use_metadata: bool = True) -> List[str]:
     """
-    Extract symbols using enhanced NER
+    Extract symbols using enhanced NER (backward compatibility)
 
     Args:
         article: Article dictionary
@@ -396,8 +512,11 @@ def get_enhanced_symbols(article: dict,
     if ner_extractor is None:
         ner_extractor = UnifiedNER()
 
-    return ner_extractor.extract_symbols(
+    symbol_confidence_pairs = ner_extractor.extract_symbols(
         article=article,
         min_confidence=min_confidence,
         use_metadata=use_metadata
     )
+
+    # Return just symbols for backward compatibility
+    return [sym for sym, _ in symbol_confidence_pairs]

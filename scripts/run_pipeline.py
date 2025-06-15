@@ -3,9 +3,10 @@
 Main entry point for running the financial sentiment analysis pipeline
 """
 
-from config.settings import PROCESSED_OUTPUT, INPUT_PARQUET
-from pipelines.baselines import VADERBaseline
+from utils.config_loader import load_config
 from pipelines.main_pipeline import create_pipeline
+from pipelines.baselines import VADERBaseline
+from config.settings import PROCESSED_OUTPUT, INPUT_PARQUET
 import argparse
 import logging
 import sys
@@ -29,6 +30,13 @@ def main():
         description="Run Financial Sentiment Analysis Pipeline"
     )
 
+    # Config file
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to YAML configuration file"
+    )
+
     # Pipeline selection
     parser.add_argument(
         "--pipeline",
@@ -42,13 +50,11 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default=str(INPUT_PARQUET),
         help="Input parquet file"
     )
     parser.add_argument(
         "--output",
         type=str,
-        default=str(PROCESSED_OUTPUT),
         help="Output JSONL file"
     )
 
@@ -56,7 +62,6 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=50,
         help="Batch size for processing"
     )
     parser.add_argument(
@@ -84,6 +89,11 @@ def main():
         choices=["standard", "optimized", "calibrated"],
         help="Override sentiment analysis mode"
     )
+    parser.add_argument(
+        "--sentiment-batch-size",
+        type=int,
+        help="Batch size for sentiment model"
+    )
 
     # Aggregation arguments
     parser.add_argument(
@@ -97,6 +107,11 @@ def main():
         type=float,
         help="Threshold for sentiment classification"
     )
+    parser.add_argument(
+        "--no-distance-weighting",
+        action="store_true",
+        help="Disable distance-based weighting"
+    )
 
     # VADER specific
     parser.add_argument(
@@ -106,7 +121,33 @@ def main():
         help="VADER compound score threshold"
     )
 
+    # Logging
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='INFO',
+        help="Logging level"
+    )
+
     args = parser.parse_args()
+
+    # Set logging level
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+
+    # Load configuration
+    config_path = Path(args.config) if args.config else None
+    config = load_config(config_path, parse_cli=False)
+
+    # Apply command line overrides
+    if args.input:
+        config['input_parquet'] = args.input
+    if args.output:
+        config['processed_output'] = args.output
+    if args.batch_size:
+        config['pipeline_config']['batch_size'] = args.batch_size
+    if args.sentiment_batch_size:
+        config['sentiment_config']['batch_size'] = args.sentiment_batch_size
 
     logger.info("🚀 Starting Financial Sentiment Analysis Pipeline")
     logger.info(f"Pipeline type: {args.pipeline}")
@@ -115,19 +156,20 @@ def main():
         if args.pipeline == "vader":
             # Run VADER baseline
             pipeline = VADERBaseline(
-                input_path=args.input,
-                output_path=args.output,
-                batch_size=args.batch_size,
+                input_path=config.get('input_parquet', INPUT_PARQUET),
+                output_path=config.get('processed_output', PROCESSED_OUTPUT),
+                batch_size=config['pipeline_config']['batch_size'],
                 resume=not args.no_resume,
                 vader_threshold=args.vader_threshold
             )
         else:
             # Create main pipeline
             kwargs = {
-                "input_path": args.input,
-                "output_path": args.output,
-                "batch_size": args.batch_size,
-                "resume": not args.no_resume
+                "input_path": config.get('input_parquet', INPUT_PARQUET),
+                "output_path": config.get('processed_output', PROCESSED_OUTPUT),
+                "batch_size": config['pipeline_config']['batch_size'],
+                "resume": not args.no_resume,
+                "use_distance_weighting": not args.no_distance_weighting
             }
 
             # Add optional overrides

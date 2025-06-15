@@ -23,6 +23,7 @@ class FinancialSentimentPipeline(BasePipeline):
                  sentiment_mode: str = "optimized",
                  aggregation_method: str = "conf_weighted",
                  aggregation_threshold: float = 0.1,
+                 use_distance_weighting: bool = True,
                  **kwargs):
         """
         Initialize main pipeline
@@ -31,6 +32,7 @@ class FinancialSentimentPipeline(BasePipeline):
             sentiment_mode: Sentiment analysis mode (standard/optimized/calibrated)
             aggregation_method: Method for aggregating sentiments
             aggregation_threshold: Threshold for sentiment classification
+            use_distance_weighting: Whether to use distance-based weighting in aggregation
             **kwargs: Additional configuration
         """
         super().__init__(**kwargs)
@@ -38,11 +40,13 @@ class FinancialSentimentPipeline(BasePipeline):
         self.sentiment_mode = sentiment_mode
         self.aggregation_method = aggregation_method
         self.aggregation_threshold = aggregation_threshold
+        self.use_distance_weighting = use_distance_weighting
 
         logger.info(f"Pipeline configured with:")
         logger.info(f"  Sentiment mode: {sentiment_mode}")
         logger.info(
             f"  Aggregation: {aggregation_method} (threshold={aggregation_threshold})")
+        logger.info(f"  Distance weighting: {use_distance_weighting}")
 
     def initialize_components(self):
         """Initialize all pipeline components"""
@@ -53,7 +57,8 @@ class FinancialSentimentPipeline(BasePipeline):
             f"Loading sentiment analyzer ({self.sentiment_mode} mode)...")
         self.sentiment_analyzer = UnifiedSentimentAnalyzer(
             mode=self.sentiment_mode,
-            device=self.config.get("device")
+            device=self.config.get("device"),
+            batch_size=self.config.get("sentiment_batch_size", 16)
         )
 
         # Initialize NER
@@ -68,7 +73,8 @@ class FinancialSentimentPipeline(BasePipeline):
         logger.info("Loading aggregator...")
         self.aggregator = Aggregator(
             method=self.aggregation_method,
-            threshold=self.aggregation_threshold
+            threshold=self.aggregation_threshold,
+            use_distance_weighting=self.use_distance_weighting
         )
 
         logger.info("All components initialized successfully")
@@ -82,6 +88,7 @@ class OptimizedPipeline(FinancialSentimentPipeline):
             sentiment_mode="optimized",
             aggregation_method="conf_weighted",
             aggregation_threshold=0.1,
+            use_distance_weighting=True,
             **kwargs
         )
 
@@ -94,6 +101,7 @@ class StandardPipeline(FinancialSentimentPipeline):
             sentiment_mode="standard",
             aggregation_method="default",
             aggregation_threshold=0.1,
+            use_distance_weighting=False,
             **kwargs
         )
 
@@ -106,6 +114,7 @@ class CalibratedPipeline(FinancialSentimentPipeline):
             sentiment_mode="calibrated",
             aggregation_method="conf_weighted",
             aggregation_threshold=0.05,
+            use_distance_weighting=True,
             **kwargs
         )
 

@@ -1,10 +1,14 @@
 # config/settings.py
 """
 Centralized configuration for Financial Sentiment Analysis Pipeline
+Default values - can be overridden by config.yaml and CLI args
 """
 
 import os
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Base paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -38,6 +42,10 @@ DATA_COLLECTION = {
     "min_content_words": 50,
     "min_title_words": 3,
     "max_duplicate_threshold": 0.85,
+    "max_retries": 5,
+    "backoff_factor": 2,
+    "initial_retry_delay": 1,
+    "max_pages_per_tag": 50,
 }
 
 # Model Settings
@@ -49,18 +57,14 @@ MODELS = {
 
 # Sentiment Analysis Settings
 SENTIMENT_CONFIG = {
-    "batch_size": 16,
+    "batch_size": 16,  # Fixed from dynamic default
     "max_length": 512,
     "device": None,  # Auto-detect
-
-    # Optimization parameters
     "neutral_penalty": 0.5,
     "pos_boost": 1.1,
     "neg_boost": 1.1,
     "min_confidence_diff": 0.03,
-
-    # Aggregation settings
-    "method": "conf_weighted",  # default, majority, conf_weighted
+    "method": "conf_weighted",
     "threshold": 0.1,
 }
 
@@ -70,6 +74,7 @@ NER_CONFIG = {
     "use_metadata": True,
     "exchange_suffixes": {'.US', '.TO', '.L', '.PA', '.F', '.HM', '.MI',
                           '.AS', '.MX', '.SA', '.BE', '.DU', '.MU', '.STU', '.XETRA'},
+    "multi_word_ticker_pattern": r"\b[A-Z]{1,5}(?:\.[A-Z])?\b",
 }
 
 # Text Processing Settings
@@ -82,10 +87,11 @@ TEXT_PROCESSING = {
 
 # Pipeline Settings
 PIPELINE_CONFIG = {
-    "batch_size": 50,  # For Colab
-    "sentiment_batch_size": 8,
+    "batch_size": 50,
+    "sentiment_batch_size": 16,
     "max_retries": 3,
-    "checkpoint_interval": 10,  # Save checkpoint every N tags
+    "checkpoint_interval": 10,
+    "buffer_size": 100,  # For JSONL writing
 }
 
 # Visualization Settings
@@ -159,3 +165,30 @@ LOW_QUALITY_PATTERNS = [
     "disclaimer:",
     "for educational purposes only"
 ]
+
+# Create default config dictionary
+DEFAULT_CONFIG = {
+    "project_root": str(PROJECT_ROOT),
+    "data_dir": str(DATA_DIR),
+    "output_dir": str(OUTPUT_DIR),
+    "plots_dir": str(PLOTS_DIR),
+    "checkpoints_dir": str(CHECKPOINTS_DIR),
+    "master_ticker_list": str(MASTER_TICKER_LIST),
+    "ticker_sector_file": str(TICKER_SECTOR_FILE),
+    "input_parquet": str(INPUT_PARQUET),
+    "processed_output": str(PROCESSED_OUTPUT),
+    "eodhd_api_token": EODHD_API_TOKEN,
+    "openai_api_key": OPENAI_API_KEY,
+    "data_collection": DATA_COLLECTION,
+    "models": MODELS,
+    "sentiment_config": SENTIMENT_CONFIG,
+    "ner_config": NER_CONFIG,
+    "text_processing": TEXT_PROCESSING,
+    "pipeline_config": PIPELINE_CONFIG,
+    "plot_config": PLOT_CONFIG,
+    "vader_config": VADER_CONFIG,
+    "collection_tags": COLLECTION_TAGS,
+    "excluded_words": list(EXCLUDED_WORDS),
+    "financial_contexts": FINANCIAL_CONTEXTS,
+    "low_quality_patterns": LOW_QUALITY_PATTERNS,
+}

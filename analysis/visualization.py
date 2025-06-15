@@ -9,6 +9,7 @@ import numpy as np
 from typing import Dict, List, Optional
 from pathlib import Path
 import logging
+import pandas as pd
 
 from config.settings import PLOT_CONFIG, PLOTS_DIR
 

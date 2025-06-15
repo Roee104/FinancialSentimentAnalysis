@@ -10,7 +10,6 @@ import logging
 
 from pipelines.base_pipeline import BasePipeline
 from core.ner import UnifiedNER
-from core.text_processor import TextProcessor
 from config.settings import VADER_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -62,8 +61,11 @@ class VADERBaseline(BasePipeline):
             if not title and not content:
                 return None
 
+            # Generate hash for deduplication
+            article_hash = self._get_article_hash(title, content)
+
             # Skip if already processed
-            if self.resume and title in self.processed_titles:
+            if self.resume and article_hash in self.processed_hashes:
                 self.stats['skipped'] += 1
                 return None
 
@@ -77,14 +79,16 @@ class VADERBaseline(BasePipeline):
                 scores['compound'])
             self.stats['sentiment_dist'][sentiment_label] += 1
 
-            # Extract tickers (same as main pipeline)
+            # Extract tickers (returns list of (ticker, confidence) tuples)
             article_dict = {
                 "title": title,
                 "content": content,
                 "symbols": self.ner.handle_symbols_array(row.get("symbols", []))
             }
 
-            symbols = self.ner.extract_symbols(article_dict)
+            symbol_confidence_pairs = self.ner.extract_symbols(article_dict)
+            # Extract just symbols
+            symbols = [sym for sym, _ in symbol_confidence_pairs]
 
             # Update ticker stats
             if symbols:
@@ -97,6 +101,7 @@ class VADERBaseline(BasePipeline):
             record = {
                 "date": date.isoformat() if hasattr(date, "isoformat") else str(date),
                 "title": title[:500],
+                "article_hash": article_hash,
                 "overall_sentiment": sentiment_label,
                 "vader_scores": scores,
                 "compound_score": scores['compound'],

@@ -8,6 +8,8 @@ import re
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 import logging
+import numpy as np
+from difflib import SequenceMatcher
 
 from config.settings import SENTIMENT_CONFIG, DATA_DIR
 
@@ -20,7 +22,8 @@ class Aggregator:
     def __init__(self,
                  method: str = None,
                  threshold: float = None,
-                 sector_lookup: Dict[str, str] = None):
+                 sector_lookup: Dict[str, str] = None,
+                 use_distance_weighting: bool = True):
         """
         Initialize aggregator
 
@@ -28,9 +31,11 @@ class Aggregator:
             method: Aggregation method (default/majority/conf_weighted)
             threshold: Threshold for sentiment classification
             sector_lookup: Optional custom sector lookup dict
+            use_distance_weighting: Whether to use distance-based weighting
         """
         self.method = method or SENTIMENT_CONFIG["method"]
         self.threshold = threshold or SENTIMENT_CONFIG["threshold"]
+        self.use_distance_weighting = use_distance_weighting
 
         # Load sector lookup
         if sector_lookup:
@@ -84,9 +89,9 @@ class Aggregator:
             logger.debug(f"Ticker sector load error: {e}")
             return {}
 
-    def find_ticker_in_chunk(self, chunk: str, ticker: str, company_name: Optional[str] = None) -> bool:
+    def find_ticker_mentions(self, chunk: str, ticker: str, company_name: Optional[str] = None) -> List[Dict]:
         """
-        Check if a ticker/company is mentioned in a chunk
+        Find all mentions of a ticker/company in a chunk with positions
 
         Args:
             chunk: Text chunk
@@ -94,74 +99,142 @@ class Aggregator:
             company_name: Optional company name
 
         Returns:
-            True if ticker or company is mentioned in chunk
+            List of dicts with mention info (text, position, confidence)
         """
+        mentions = []
+        chunk_lower = chunk.lower()
         chunk_upper = chunk.upper()
 
-        # Check for ticker symbol (with word boundaries)
+        # Find ticker symbol mentions
         ticker_pattern = r'\b' + re.escape(ticker) + r'\b'
-        if re.search(ticker_pattern, chunk_upper):
-            return True
+        for match in re.finditer(ticker_pattern, chunk_upper):
+            mentions.append({
+                'text': ticker,
+                'position': match.start(),
+                'length': len(ticker),
+                'confidence': 0.9,
+                'type': 'ticker'
+            })
 
-        # Check for company name if provided
+        # Find company name mentions
         if company_name:
-            # Simple check - can be enhanced
-            if company_name.lower() in chunk.lower():
-                return True
+            # Full company name
+            company_lower = company_name.lower()
+            if company_lower in chunk_lower:
+                pos = chunk_lower.find(company_lower)
+                mentions.append({
+                    'text': company_name,
+                    'position': pos,
+                    'length': len(company_name),
+                    'confidence': 0.8,
+                    'type': 'company_full'
+                })
 
-            # Check for partial company name (first 2 words)
+            # Partial company name (first 2-3 words)
             company_words = company_name.split()
             if len(company_words) >= 2:
-                partial_name = ' '.join(company_words[:2])
-                if partial_name.lower() in chunk.lower():
-                    return True
+                partial_name = ' '.join(company_words[:2]).lower()
+                if partial_name in chunk_lower and len(partial_name) > 5:
+                    pos = chunk_lower.find(partial_name)
+                    mentions.append({
+                        'text': partial_name,
+                        'position': pos,
+                        'length': len(partial_name),
+                        'confidence': 0.6,
+                        'type': 'company_partial'
+                    })
 
-        return False
+        return mentions
+
+    def calculate_chunk_ticker_weight(self, chunk: str, mentions: List[Dict]) -> float:
+        """
+        Calculate weight for chunk-ticker assignment based on mentions
+
+        Args:
+            chunk: Text chunk
+            mentions: List of mention dicts
+
+        Returns:
+            Weight score (0-1)
+        """
+        if not mentions:
+            return 0.0
+
+        # Base weight from number of mentions
+        mention_weight = min(len(mentions) * 0.2, 0.8)
+
+        # Distance weight (prefer mentions near beginning)
+        chunk_length = len(chunk)
+        distance_scores = []
+
+        for mention in mentions:
+            position_ratio = mention['position'] / \
+                chunk_length if chunk_length > 0 else 0
+            # Higher score for mentions earlier in chunk
+            distance_score = 1.0 - (position_ratio * 0.5)
+            distance_scores.append(distance_score * mention['confidence'])
+
+        avg_distance_score = np.mean(distance_scores) if distance_scores else 0
+
+        # Combine weights
+        final_weight = (mention_weight + avg_distance_score) / 2
+
+        return min(final_weight, 1.0)
 
     def assign_chunks_to_tickers(self,
                                  chunks: List[str],
                                  predictions: List[Dict],
-                                 tickers: List[str],
+                                 tickers: List[Tuple[str, float]],
                                  ticker_to_company: Optional[Dict[str, str]] = None) -> Dict[str, List[Tuple]]:
         """
-        Context-aware assignment of chunks to tickers
+        Context-aware assignment of chunks to tickers with distance weighting
 
         Args:
             chunks: Text chunks
             predictions: Sentiment predictions for chunks
-            tickers: List of ticker symbols
+            tickers: List of (ticker, confidence) tuples
             ticker_to_company: Optional mapping of ticker to company name
 
         Returns:
-            Dict mapping ticker to list of (chunk_idx, sentiment, confidence) tuples
+            Dict mapping ticker to list of (chunk_idx, sentiment, confidence, weight) tuples
         """
         ticker_chunks = defaultdict(list)
 
         for chunk_idx, (chunk, pred) in enumerate(zip(chunks, predictions)):
-            # For each ticker, check if it's mentioned in this chunk
-            for ticker in tickers:
+            # For each ticker, check mentions and calculate weight
+            for ticker, ticker_conf in tickers:
                 company_name = ticker_to_company.get(
                     ticker) if ticker_to_company else None
 
-                if self.find_ticker_in_chunk(chunk, ticker, company_name):
+                mentions = self.find_ticker_mentions(
+                    chunk, ticker, company_name)
+
+                if mentions:
+                    weight = self.calculate_chunk_ticker_weight(
+                        chunk, mentions)
+
+                    # Apply ticker confidence to weight
+                    final_weight = weight * ticker_conf
+
                     ticker_chunks[ticker].append((
                         chunk_idx,
                         pred["label"],
                         pred["confidence"],
-                        chunk  # Keep chunk text for debugging
+                        final_weight,
+                        len(mentions)  # Number of mentions for debugging
                     ))
 
         # Log assignment statistics
         total_assignments = sum(len(v) for v in ticker_chunks.values())
         logger.debug(
-            f"Assigned {total_assignments} chunks to {len(ticker_chunks)} tickers")
+            f"Assigned {total_assignments} weighted chunks to {len(ticker_chunks)} tickers")
 
         return ticker_chunks
 
     def aggregate_article(self,
                           chunks: List[str],
                           predictions: List[Dict],
-                          symbols: List[str],
+                          symbols: List[Tuple[str, float]],
                           ticker_to_company: Optional[Dict[str, str]] = None) -> Dict:
         """
         Aggregate sentiments for a full article with context-aware assignment
@@ -169,24 +242,24 @@ class Aggregator:
         Args:
             chunks: Text chunks
             predictions: Sentiment predictions for chunks
-            symbols: Extracted ticker symbols
+            symbols: List of (ticker, confidence) tuples
             ticker_to_company: Optional ticker to company name mapping
 
         Returns:
             Dict with ticker, sector, and overall sentiments
         """
-        # Context-aware chunk assignment
+        # Context-aware chunk assignment with weights
         ticker_chunks_map = self.assign_chunks_to_tickers(
             chunks, predictions, symbols, ticker_to_company
         )
 
-        # Convert to format expected by compute_ticker_sentiment
+        # Convert to format for aggregation
         ticker_chunks_list = []
         for ticker, chunk_data in ticker_chunks_map.items():
-            for chunk_idx, label, confidence, chunk_text in chunk_data:
-                ticker_chunks_list.append((ticker, label, confidence))
+            for chunk_idx, label, confidence, weight, mention_count in chunk_data:
+                ticker_chunks_list.append((ticker, label, confidence, weight))
 
-        # Aggregate by ticker (only chunks that mention each ticker)
+        # Aggregate by ticker using weighted sentiments
         ticker_sentiments = self.compute_ticker_sentiment(ticker_chunks_list)
 
         # Aggregate by sector
@@ -207,32 +280,39 @@ class Aggregator:
         }
 
     def compute_ticker_sentiment(self,
-                                 ticker_chunks: List[Tuple[str, str, float]]) -> Dict[str, Dict]:
+                                 ticker_chunks: List[Tuple[str, str, float, float]]) -> Dict[str, Dict]:
         """
-        Aggregate chunk-level sentiments per ticker
+        Aggregate chunk-level sentiments per ticker with distance weighting
 
         Args:
-            ticker_chunks: List of (ticker, label, confidence) tuples
+            ticker_chunks: List of (ticker, label, confidence, weight) tuples
 
         Returns:
             Dict mapping ticker to sentiment info
         """
         data = defaultdict(lambda: {
             'pos_count': 0, 'neg_count': 0, 'neu_count': 0,
-            'pos_conf': 0.0, 'neg_conf': 0.0, 'neu_conf': 0.0
+            'pos_conf': 0.0, 'neg_conf': 0.0, 'neu_conf': 0.0,
+            'pos_weight': 0.0, 'neg_weight': 0.0, 'neu_weight': 0.0,
+            'total_weight': 0.0
         })
 
-        for ticker, label, conf in ticker_chunks:
+        for ticker, label, conf, weight in ticker_chunks:
             d = data[ticker]
+            d['total_weight'] += weight
+
             if label == 'Positive':
                 d['pos_count'] += 1
                 d['pos_conf'] += conf
+                d['pos_weight'] += weight
             elif label == 'Negative':
                 d['neg_count'] += 1
                 d['neg_conf'] += conf
+                d['neg_weight'] += weight
             else:
                 d['neu_count'] += 1
                 d['neu_conf'] += conf
+                d['neu_weight'] += weight
 
         results = {}
         for tick, d in data.items():
@@ -242,42 +322,46 @@ class Aggregator:
             if tot_chunks == 0:
                 continue
 
-            tot_conf = d['pos_conf'] + d['neg_conf'] + d['neu_conf']
+            if self.use_distance_weighting and d['total_weight'] > 0:
+                # Use weighted scores
+                score = (d['pos_weight'] - d['neg_weight']) / d['total_weight']
+            else:
+                # Fallback to count-based
+                tot_conf = d['pos_conf'] + d['neg_conf'] + d['neu_conf']
 
-            if self.method == "majority":
-                if pos > neg and pos > neu:
-                    label = 'Positive'
-                elif neg > pos and neg > neu:
-                    label = 'Negative'
-                else:
-                    label = 'Neutral'
-                score = (pos - neg) / tot_chunks
+                if self.method == "majority":
+                    if pos > neg and pos > neu:
+                        label = 'Positive'
+                    elif neg > pos and neg > neu:
+                        label = 'Negative'
+                    else:
+                        label = 'Neutral'
+                    score = (pos - neg) / tot_chunks
 
-            elif self.method == "conf_weighted":
-                score = ((d['pos_conf'] - d['neg_conf']) /
-                         tot_conf) if tot_conf else 0.0
-                if score > self.threshold:
-                    label = 'Positive'
-                elif score < -self.threshold:
-                    label = 'Negative'
-                else:
-                    label = 'Neutral'
+                elif self.method == "conf_weighted":
+                    score = ((d['pos_conf'] - d['neg_conf']) /
+                             tot_conf) if tot_conf else 0.0
 
-            else:  # default
-                score = (pos - neg) / tot_chunks
-                if score > self.threshold:
-                    label = 'Positive'
-                elif score < -self.threshold:
-                    label = 'Negative'
-                else:
-                    label = 'Neutral'
+                else:  # default
+                    score = (pos - neg) / tot_chunks
 
-            avg_conf = tot_conf / tot_chunks if tot_chunks else 0.0
+            # Determine label based on score
+            if score > self.threshold:
+                label = 'Positive'
+            elif score < -self.threshold:
+                label = 'Negative'
+            else:
+                label = 'Neutral'
+
+            avg_conf = (d['pos_conf'] + d['neg_conf'] +
+                        d['neu_conf']) / tot_chunks if tot_chunks else 0.0
+
             results[tick] = {
                 'score': score,
                 'label': label,
                 'confidence': avg_conf,
-                'chunk_count': tot_chunks
+                'chunk_count': tot_chunks,
+                'avg_weight': d['total_weight'] / tot_chunks if tot_chunks else 0
             }
 
         return results
@@ -294,13 +378,14 @@ class Aggregator:
             Dict mapping sector to sentiment info
         """
         agg = defaultdict(
-            lambda: {'score_sum': 0.0, 'conf_sum': 0.0, 'count': 0})
+            lambda: {'score_sum': 0.0, 'conf_sum': 0.0, 'count': 0, 'weight_sum': 0.0})
 
         for tick, info in ticker_sentiments.items():
             sector = self.sector_lookup.get(tick, 'Unknown')
             agg[sector]['score_sum'] += info['score']
             agg[sector]['conf_sum'] += info['confidence']
             agg[sector]['count'] += 1
+            agg[sector]['weight_sum'] += info.get('avg_weight', 1.0)
 
         results = {}
         for sector, d in agg.items():
@@ -322,7 +407,8 @@ class Aggregator:
                 'score': avg_score,
                 'label': label,
                 'confidence': avg_conf,
-                'weight': cnt
+                'weight': cnt,
+                'avg_ticker_weight': d['weight_sum'] / cnt
             }
 
         return results
@@ -390,26 +476,46 @@ class Aggregator:
 
         return label, avg_conf
 
-    def compute_article_sentiment(self,
-                                  ticker_sentiments: Dict[str, Dict]) -> Tuple[str, float]:
-        """
-        Legacy method - compute from ticker sentiments
-        Kept for backward compatibility
-        """
-        if not ticker_sentiments:
-            return 'Neutral', 0.0
+    # Unit test
+    def test_distance_weighting(self):
+        """Test distance-based weighting functionality"""
+        test_chunks = [
+            "Apple (AAPL) reported strong earnings growth.",
+            "The market reacted positively to the news.",
+            "Microsoft shares declined on regulatory concerns."
+        ]
 
-        scores = [v['score'] for v in ticker_sentiments.values()]
-        confs = [v['confidence'] for v in ticker_sentiments.values()]
+        test_predictions = [
+            {"label": "Positive", "confidence": 0.9},
+            {"label": "Positive", "confidence": 0.8},
+            {"label": "Negative", "confidence": 0.85}
+        ]
 
-        avg_score = sum(scores)/len(scores)
-        avg_conf = sum(confs)/len(confs)
+        test_tickers = [("AAPL", 0.95), ("MSFT", 0.9)]
 
-        if avg_score > self.threshold:
-            label = 'Positive'
-        elif avg_score < -self.threshold:
-            label = 'Negative'
-        else:
-            label = 'Neutral'
+        try:
+            result = self.aggregate_article(
+                chunks=test_chunks,
+                predictions=test_predictions,
+                symbols=test_tickers,
+                ticker_to_company={"AAPL": "Apple Inc",
+                                   "MSFT": "Microsoft Corporation"}
+            )
 
-        return label, avg_conf
+            # Check structure
+            assert "ticker_sentiments" in result
+            assert "overall_sentiment" in result
+            assert len(result["ticker_sentiments"]) > 0
+
+            # AAPL should be positive (mentioned in positive chunk)
+            aapl_sentiment = next(
+                (t for t in result["ticker_sentiments"] if t["symbol"] == "AAPL"), None)
+            assert aapl_sentiment is not None
+            assert aapl_sentiment["label"] == "Positive"
+
+            logger.info("✅ Distance weighting test passed")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Distance weighting test failed: {e}")
+            return False
