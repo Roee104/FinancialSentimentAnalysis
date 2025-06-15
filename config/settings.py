@@ -420,3 +420,36 @@ DEFAULT_CONFIG = {
     "low_quality_patterns": LOW_QUALITY_PATTERNS,
     "quality_filter_stats": QUALITY_FILTER_STATS,
 }
+
+# ─────────────────────────────────────────────────────────────
+# Central logging configuration
+# Imported by scripts/run_pipeline.py → logging.config.dictConfig
+# ─────────────────────────────────────────────────────────────
+
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+
+    # FORMATTERS  ────────────────
+    "formatters": {
+        "console": {
+            "format": "%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+
+    # HANDLERS  ─────────────────
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",              # default; overridden by --log-level
+            "formatter": "console",
+        },
+    },
+
+    # ROOT LOGGER  ──────────────
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}
