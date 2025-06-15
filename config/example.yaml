@@ -1,0 +1,54 @@
+# config/example.yaml
+# Example configuration file for Financial Sentiment Analysis Pipeline
+# Copy to config.yaml and modify as needed
+
+# Data collection settings
+data_collection:
+  target_per_tag: 1000  # Reduce for testing
+  batch_size: 100
+  max_retries: 3
+  max_pages_per_tag: 20
+  duplicate_check_window: 500  # Smaller window for performance
+
+# Model settings
+models:
+  finbert: "yiyanghkust/finbert-tone"  # Can switch to other models
+
+# Sentiment analysis settings
+sentiment_config:
+  batch_size: 32  # Increase if GPU memory allows
+  max_length: 256  # Reduce for faster processing
+  method: "conf_weighted"  # Options: default, majority, conf_weighted
+  threshold: 0.15  # Adjust sentiment classification threshold
+
+# NER settings
+ner_config:
+  min_confidence: 0.7  # Stricter confidence threshold
+  cache_sectors: true
+  sector_cache_ttl: 604800  # Cache for 1 week
+
+# Pipeline settings
+pipeline_config:
+  batch_size: 100
+  sentiment_batch_size: 32
+  checkpoint_interval: 5  # More frequent checkpoints
+  buffer_size: 200  # Larger write buffer
+
+# Logging
+logging_config:
+  handlers:
+    console:
+      level: "INFO"  # Set to DEBUG for verbose output
+    file:
+      level: "DEBUG"
+      filename: "data/pipeline_debug.log"
+
+# Override input/output paths
+# input_parquet: "data/my_custom_data.parquet"
+# processed_output: "data/my_results.jsonl"
+
+# Custom tags for collection (uncomment to override)
+# collection_tags:
+#   - "earnings report"
+#   - "quarterly results"
+#   - "financial results"

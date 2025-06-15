@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 import os
 import json
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Set
 import logging
 from pathlib import Path
 import hashlib
@@ -19,10 +19,18 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import asyncio
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from unittest.mock import Mock, patch
 
 from config.settings import (
-    DATA_COLLECTION, EODHD_API_TOKEN, MODELS,
-    COLLECTION_TAGS, LOW_QUALITY_PATTERNS, DATA_DIR, CHECKPOINTS_DIR
+    DATA_COLLECTION,
+    EODHD_API_TOKEN,
+    MODELS,
+    COLLECTION_TAGS,
+    LOW_QUALITY_PATTERNS,
+    DATA_DIR,
+    CHECKPOINTS_DIR,
+    QUALITY_FILTER_STATS,
 )
 from data.validator import DataValidator
 
@@ -32,9 +40,7 @@ logger = logging.getLogger(__name__)
 class NewsDataCollector:
     """Handles collection of financial news data from EODHD API"""
 
-    def __init__(self,
-                 api_token: str = None,
-                 config: dict = None):
+    def __init__(self, api_token: str = None, config: dict = None):
         """
         Initialize data collector
 
@@ -56,12 +62,19 @@ class NewsDataCollector:
 
         # Statistics
         self.quality_stats = {
-            'total_fetched': 0,
-            'quality_filtered': 0,
-            'duplicate_filtered': 0,
-            'final_count': 0,
-            'failed_tags': []
+            "total_fetched": 0,
+            "quality_filtered": 0,
+            "duplicate_filtered": 0,
+            "final_count": 0,
+            "failed_tags": [],
+            "filter_reasons": QUALITY_FILTER_STATS.copy(),
         }
+
+        # Efficient duplicate detection with rolling window
+        self.seen_hashes = set()
+        self.recent_articles = deque(
+            maxlen=self.config.get("duplicate_check_window", 1000)
+        )
 
         # State persistence
         self.state_dir = CHECKPOINTS_DIR / "crawler_state"
@@ -71,7 +84,7 @@ class NewsDataCollector:
 
     def _get_state_file(self, tag: str) -> Path:
         """Get state file path for a tag"""
-        safe_tag = tag.replace(' ', '_').replace('/', '_')
+        safe_tag = tag.replace(" ", "_").replace("/", "_")
         return self.state_dir / f"{safe_tag}_state.json"
 
     def _load_state(self, tag: str) -> Dict:
@@ -79,30 +92,27 @@ class NewsDataCollector:
         state_file = self._get_state_file(tag)
         if state_file.exists():
             try:
-                with open(state_file, 'r') as f:
+                with open(state_file, "r") as f:
                     return json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load state for {tag}: {e}")
         return {
-            'last_offset': 0,
-            'collected_count': 0,
-            'retry_count': 0,
-            'last_timestamp': None
+            "last_offset": 0,
+            "collected_count": 0,
+            "retry_count": 0,
+            "last_timestamp": None,
         }
 
     def _save_state(self, tag: str, state: Dict):
         """Save crawler state for a tag"""
         state_file = self._get_state_file(tag)
         try:
-            with open(state_file, 'w') as f:
+            with open(state_file, "w") as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save state for {tag}: {e}")
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10)
-    )
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
     def fetch_page(self, tag: str, offset: int) -> Optional[List[Dict]]:
         """
         Fetch one page of articles for a given tag
@@ -121,14 +131,12 @@ class NewsDataCollector:
             "limit": self.config["batch_size"],
             "offset": offset,
             "api_token": self.api_token,
-            "fmt": "json"
+            "fmt": "json",
         }
 
         try:
             response = requests.get(
-                self.config["base_url"],
-                params=params,
-                timeout=30
+                self.config["base_url"], params=params, timeout=30
             )
             response.raise_for_status()
             return response.json()
@@ -140,6 +148,28 @@ class NewsDataCollector:
             logger.error(
                 f"Error parsing JSON for tag '{tag}' at offset {offset}: {e}")
             raise
+
+    def _add_to_duplicate_check(self, article_hash: str, article: Dict):
+        """Add article to duplicate detection structures"""
+        self.seen_hashes.add(article_hash)
+        self.recent_articles.append(article)
+
+    def _is_duplicate(self, article: Dict) -> bool:
+        """Check if article is duplicate using O(1) hash lookup + O(n) similarity for recent window"""
+        # Generate hash
+        article_hash = hashlib.md5(
+            f"{article.get('title', '')}_{article.get('content', '')}".encode()
+        ).hexdigest()
+
+        # Quick hash check
+        if article_hash in self.seen_hashes:
+            return True
+
+        # Check similarity against recent window only
+        if self.validator.detect_near_duplicates(article, list(self.recent_articles)):
+            return True
+
+        return False
 
     def collect_articles_for_tag(self, tag: str) -> List[Dict]:
         """
@@ -155,7 +185,7 @@ class NewsDataCollector:
 
         # Load state
         state = self._load_state(tag)
-        offset = state['last_offset']
+        offset = state["last_offset"]
         tag_collected = {}
         tag_quality_filtered = 0
         tag_duplicate_filtered = 0
@@ -163,13 +193,17 @@ class NewsDataCollector:
         pages_fetched = 0
 
         # Continue from saved state
-        if state['collected_count'] > 0:
+        if state["collected_count"] > 0:
             logger.info(
-                f"Resuming from offset {offset}, already collected {state['collected_count']}")
+                f"Resuming from offset {offset}, already collected {state['collected_count']}"
+            )
 
-        while (len(tag_collected) + state['collected_count'] < self.config["target_per_tag"] and
-               consecutive_failures < self.config["max_retries"] and
-               pages_fetched < self.config.get("max_pages_per_tag", 50)):
+        while (
+            len(tag_collected) + state["collected_count"]
+            < self.config["target_per_tag"]
+            and consecutive_failures < self.config["max_retries"]
+            and pages_fetched < self.config.get("max_pages_per_tag", 50)
+        ):
 
             try:
                 # Fetch page with retry
@@ -185,13 +219,13 @@ class NewsDataCollector:
 
                 new_count = 0
                 for art in data:
-                    self.quality_stats['total_fetched'] += 1
+                    self.quality_stats["total_fetched"] += 1
 
                     link = art.get("link")
                     if not link:
                         continue
 
-                    # Create article hash for deduplication
+                    # Create article hash
                     article_hash = hashlib.md5(
                         f"{art.get('title', '')}_{art.get('content', '')}".encode()
                     ).hexdigest()
@@ -199,22 +233,24 @@ class NewsDataCollector:
                     if article_hash in tag_collected:
                         continue
 
-                    # Quality validation
-                    if not self.validator.validate_article_quality(art):
-                        self.quality_stats['quality_filtered'] += 1
+                    # Quality validation with reason tracking
+                    is_valid, reason = self.validator.validate_article_quality_with_reason(
+                        art
+                    )
+                    if not is_valid:
+                        self.quality_stats["quality_filtered"] += 1
+                        self.quality_stats["filter_reasons"][reason] += 1
                         tag_quality_filtered += 1
                         continue
 
-                    # Duplicate detection
-                    if self.validator.detect_near_duplicates(
-                        art, list(tag_collected.values())
-                    ):
-                        self.quality_stats['duplicate_filtered'] += 1
+                    # Efficient duplicate detection
+                    if self._is_duplicate(art):
+                        self.quality_stats["duplicate_filtered"] += 1
                         tag_duplicate_filtered += 1
                         continue
 
                     # Add valid article
-                    tag_collected[article_hash] = {
+                    article_data = {
                         "date": art.get("date"),
                         "title": art.get("title", ""),
                         "content": art.get("content", ""),
@@ -223,20 +259,28 @@ class NewsDataCollector:
                         "sentiment": art.get("sentiment", {}),
                         "tag_source": tag,
                         "link": link,
-                        "article_hash": article_hash
+                        "article_hash": article_hash,
                     }
+
+                    tag_collected[article_hash] = article_data
+                    self._add_to_duplicate_check(article_hash, article_data)
                     new_count += 1
 
-                logger.info(f"  Offset {offset}: fetched {len(data)}, "
-                            f"+{new_count} valid, total = {len(tag_collected) + state['collected_count']}")
+                logger.info(
+                    f"  Offset {offset}: fetched {len(data)}, "
+                    f"+{new_count} valid, total = {len(tag_collected) + state['collected_count']}"
+                )
 
                 # Update state
-                state['last_offset'] = offset + self.config["batch_size"]
-                state['collected_count'] += new_count
-                state['last_timestamp'] = datetime.now().isoformat()
+                state["last_offset"] = offset + self.config["batch_size"]
+                state["collected_count"] += new_count
+                state["last_timestamp"] = datetime.now().isoformat()
                 self._save_state(tag, state)
 
-                if len(tag_collected) + state['collected_count'] >= self.config["target_per_tag"]:
+                if (
+                    len(tag_collected) + state["collected_count"]
+                    >= self.config["target_per_tag"]
+                ):
                     break
 
                 offset += self.config["batch_size"]
@@ -245,17 +289,19 @@ class NewsDataCollector:
             except Exception as e:
                 consecutive_failures += 1
                 logger.warning(
-                    f"Attempt {consecutive_failures}/{self.config['max_retries']} failed: {e}")
+                    f"Attempt {consecutive_failures}/{self.config['max_retries']} failed: {e}"
+                )
 
                 if consecutive_failures < self.config["max_retries"]:
                     # Exponential backoff
-                    sleep_time = self.config["initial_retry_delay"] * \
-                        (self.config["backoff_factor"] ** consecutive_failures)
+                    sleep_time = self.config["initial_retry_delay"] * (
+                        self.config["backoff_factor"] ** consecutive_failures
+                    )
                     logger.info(f"Retrying after {sleep_time:.1f} seconds...")
                     time.sleep(sleep_time)
                 else:
                     logger.error(f"Max retries reached for tag '{tag}'")
-                    self.quality_stats['failed_tags'].append(tag)
+                    self.quality_stats["failed_tags"].append(tag)
                     break
 
         # Summary
@@ -268,31 +314,12 @@ class NewsDataCollector:
 
         return tag_articles
 
-    async def fetch_page_async(self, session: aiohttp.ClientSession, tag: str, offset: int) -> Optional[List[Dict]]:
-        """Async version of fetch_page"""
-        params = {
-            "t": tag,
-            "from": self.config["from_date"],
-            "to": self.config["to_date"],
-            "limit": self.config["batch_size"],
-            "offset": offset,
-            "api_token": self.api_token,
-            "fmt": "json"
-        }
-
-        try:
-            async with session.get(self.config["base_url"], params=params, timeout=30) as response:
-                response.raise_for_status()
-                return await response.json()
-        except Exception as e:
-            logger.error(
-                f"Async fetch error for tag '{tag}' at offset {offset}: {e}")
-            return None
-
-    def collect_all_articles(self,
-                             tags: List[str] = None,
-                             checkpoint_interval: int = 10,
-                             use_async: bool = False) -> List[Dict]:
+    def collect_all_articles(
+        self,
+        tags: List[str] = None,
+        checkpoint_interval: int = 10,
+        use_async: bool = False,
+    ) -> List[Dict]:
         """
         Collect articles for all tags
 
@@ -310,7 +337,8 @@ class NewsDataCollector:
         logger.info(f"🚀 Starting data collection for {len(tags)} tags...")
         logger.info(f"Target per tag: {self.config['target_per_tag']}")
         logger.info(
-            f"Date range: {self.config['from_date']} to {self.config['to_date']}")
+            f"Date range: {self.config['from_date']} to {self.config['to_date']}"
+        )
 
         for tag_idx, tag in enumerate(tags, 1):
             logger.info(f"\n[{tag_idx}/{len(tags)}] {tag}")
@@ -323,20 +351,29 @@ class NewsDataCollector:
                 self.save_checkpoint(all_articles, f"tags_1_to_{tag_idx}")
 
         # Final statistics
-        self.quality_stats['final_count'] = len(all_articles)
+        self.quality_stats["final_count"] = len(all_articles)
         logger.info(f"\n🎯 Collection Summary:")
         logger.info(
             f"Total articles fetched: {self.quality_stats['total_fetched']}")
         logger.info(
-            f"Quality filtered out: {self.quality_stats['quality_filtered']}")
+            f"Quality filtered out: {self.quality_stats['quality_filtered']}"
+        )
         logger.info(
-            f"Duplicates filtered out: {self.quality_stats['duplicate_filtered']}")
+            f"Duplicates filtered out: {self.quality_stats['duplicate_filtered']}"
+        )
         logger.info(
             f"Final collection size: {self.quality_stats['final_count']}")
 
-        if self.quality_stats['failed_tags']:
+        # Log filter reasons
+        logger.info("\nQuality filter breakdown:")
+        for reason, count in self.quality_stats["filter_reasons"].items():
+            if count > 0:
+                logger.info(f"  {reason}: {count}")
+
+        if self.quality_stats["failed_tags"]:
             logger.warning(
-                f"Failed tags: {', '.join(self.quality_stats['failed_tags'])}")
+                f"Failed tags: {', '.join(self.quality_stats['failed_tags'])}"
+            )
 
         return all_articles
 
@@ -366,29 +403,42 @@ class NewsDataCollector:
 
         # Build DataFrame
         df = pd.DataFrame(articles)
-        df = df[[
-            "date", "title", "content", "symbols", "tags", "tag_source",
-            "sentiment_label", "sentiment", "token_count", "link", "article_hash"
-        ]]
+        df = df[
+            [
+                "date",
+                "title",
+                "content",
+                "symbols",
+                "tags",
+                "tag_source",
+                "sentiment_label",
+                "sentiment",
+                "token_count",
+                "link",
+                "article_hash",
+            ]
+        ]
 
         return df
 
     def save_checkpoint(self, articles: List[Dict], tag: str):
         """Save checkpoint of collected articles"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        checkpoint_file = CHECKPOINTS_DIR / \
+        checkpoint_file = (
+            CHECKPOINTS_DIR /
             f"checkpoint_{tag.replace(' ', '_')}_{timestamp}.json"
+        )
 
         # Save quality stats too
         checkpoint_data = {
-            'tag': tag,
-            'count': len(articles),
-            'timestamp': timestamp,
-            'quality_stats': self.quality_stats,
-            'articles': articles[-100:]  # Save last 100 as sample
+            "tag": tag,
+            "count": len(articles),
+            "timestamp": timestamp,
+            "quality_stats": self.quality_stats,
+            "articles": articles[-100:],  # Save last 100 as sample
         }
 
-        with open(checkpoint_file, 'w', encoding='utf-8') as f:
+        with open(checkpoint_file, "w", encoding="utf-8") as f:
             json.dump(checkpoint_data, f, indent=2, ensure_ascii=False)
 
         logger.info(f"Checkpoint saved: {checkpoint_file}")
@@ -404,7 +454,7 @@ class NewsDataCollector:
 
         label, _ = max(
             [("Negative", neg), ("Neutral", neu), ("Positive", pos)],
-            key=lambda x: x[1]
+            key=lambda x: x[1],
         )
         return label
 
@@ -415,18 +465,37 @@ class NewsDataCollector:
         except Exception:
             return len(text.split())
 
-    # Unit test
+    # Unit test with mocking
     def test_fetch_page(self):
-        """Test fetch_page functionality"""
+        """Test fetch_page functionality with mock"""
         try:
-            # Test with a small request
-            test_tag = self.config.get('collection_tags', ['earnings'])[0]
-            result = self.fetch_page(test_tag, 0)
-            assert result is not None, "Fetch returned None"
-            assert isinstance(result, list), "Fetch didn't return a list"
-            logger.info(
-                f"✅ fetch_page test passed: got {len(result)} articles")
-            return True
+            # Mock the requests.get call
+            with patch("requests.get") as mock_get:
+                # Setup mock response
+                mock_response = Mock()
+                mock_response.json.return_value = [
+                    {
+                        "title": "Test Article",
+                        "content": "Test content",
+                        "link": "http://test.com/1",
+                        "date": "2024-01-01",
+                        "symbols": ["AAPL"],
+                    }
+                ]
+                mock_response.raise_for_status = Mock()
+                mock_get.return_value = mock_response
+
+                # Test
+                test_tag = "earnings"
+                result = self.fetch_page(test_tag, 0)
+
+                assert result is not None, "Fetch returned None"
+                assert isinstance(result, list), "Fetch didn't return a list"
+                assert len(result) == 1, "Mock should return 1 article"
+                logger.info(
+                    f"✅ fetch_page test passed: got {len(result)} articles")
+                return True
+
         except Exception as e:
             logger.error(f"❌ fetch_page test failed: {e}")
             return False
@@ -436,8 +505,7 @@ class DataLoader:
     """Handles loading of processed data files"""
 
     @staticmethod
-    def load_parquet(filepath: Union[str, Path],
-                     engine: str = "pyarrow") -> pd.DataFrame:
+    def load_parquet(filepath: Union[str, Path], engine: str = "pyarrow") -> pd.DataFrame:
         """Load parquet file with error handling"""
         filepath = Path(filepath)
 
@@ -461,7 +529,7 @@ class DataLoader:
         filepath = Path(filepath)
         results = []
 
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     results.append(json.loads(line))
@@ -478,7 +546,7 @@ class DataLoader:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             for record in data:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -488,10 +556,8 @@ class DataLoader:
     @staticmethod
     def test_jsonl_io():
         """Test JSONL I/O functionality"""
-        test_data = [
-            {"id": 1, "text": "test article 1"},
-            {"id": 2, "text": "test article 2"}
-        ]
+        test_data = [{"id": 1, "text": "test article 1"},
+                     {"id": 2, "text": "test article 2"}]
         test_file = Path("/tmp/test_loader.jsonl")
 
         try:
@@ -510,11 +576,18 @@ class DataLoader:
 # Main collection function for backward compatibility
 def main():
     """Run data collection"""
+    # Setup logging from config
+    import logging.config
+    from config.settings import LOGGING_CONFIG
+
+    logging.config.dictConfig(LOGGING_CONFIG)
+
     # Load config
     from utils.config_loader import load_config
+
     config = load_config()
 
-    collector = NewsDataCollector(config=config.get('data_collection'))
+    collector = NewsDataCollector(config=config.get("data_collection"))
 
     # Run tests first
     logger.info("Running data loader tests...")
@@ -532,8 +605,10 @@ def main():
     df = collector.process_for_dataset(articles)
 
     # Save to parquet
-    output_file = Path(config.get('input_parquet', DATA_DIR /
-                       "financial_news_2020_2025_100k.parquet"))
+    output_file = Path(
+        config.get("input_parquet", DATA_DIR /
+                   "financial_news_2020_2025_100k.parquet")
+    )
     df.to_parquet(output_file, index=False)
     logger.info(f"✅ Dataset saved to {output_file}")
 
@@ -542,22 +617,22 @@ def main():
         "collection_date": datetime.now().isoformat(),
         "total_articles": len(df),
         "date_range": f"{config['data_collection']['from_date']} to {config['data_collection']['to_date']}",
-        "tags_used": config.get('collection_tags', COLLECTION_TAGS),
+        "tags_used": config.get("collection_tags", COLLECTION_TAGS),
         "quality_stats": collector.quality_stats,
-        "columns": list(df.columns)
+        "columns": list(df.columns),
     }
 
     metadata_file = DATA_DIR / "collection_metadata.json"
-    with open(metadata_file, 'w', encoding='utf-8') as f:
+    with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     logger.info(f"✅ Metadata saved to {metadata_file}")
 
     # Display statistics
     logger.info(f"\n📊 Dataset Statistics:")
     logger.info(f"Articles by sentiment:")
-    logger.info(df['sentiment_label'].value_counts())
+    logger.info(df["sentiment_label"].value_counts())
     logger.info(f"\nToken count statistics:")
-    logger.info(df['token_count'].describe())
+    logger.info(df["token_count"].describe())
 
 
 if __name__ == "__main__":

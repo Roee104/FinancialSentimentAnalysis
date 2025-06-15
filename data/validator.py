@@ -4,7 +4,7 @@ Data validation and quality control module
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 
 from config.settings import DATA_COLLECTION, LOW_QUALITY_PATTERNS
@@ -35,22 +35,40 @@ class DataValidator:
         Returns:
             bool: True if article meets quality standards
         """
+        is_valid, _ = self.validate_article_quality_with_reason(article)
+        return is_valid
+
+    def validate_article_quality_with_reason(self, article: Dict) -> Tuple[bool, str]:
+        """
+        Filter out low-quality articles and return reason if invalid
+
+        Args:
+            article: Dictionary containing article data
+
+        Returns:
+            Tuple of (is_valid, reason)
+        """
         content = article.get("content", "").strip()
         title = article.get("title", "").strip()
 
         # Check minimum length requirements
         if len(content.split()) < self.config["min_content_words"]:
-            return False
+            return False, "min_content_words"
 
         if len(title.split()) < self.config["min_title_words"]:
-            return False
+            return False, "min_title_words"
 
         # Check for empty or placeholder content
-        if not content or content.lower() in ["", "n/a", "no content", "content not available"]:
-            return False
+        if not content or content.lower() in [
+            "",
+            "n/a",
+            "no content",
+            "content not available",
+        ]:
+            return False, "empty_content"
 
         if not title or title.lower() in ["", "n/a", "untitled"]:
-            return False
+            return False, "empty_title"
 
         # Check for auto-generated or low-quality content patterns
         content_lower = content.lower()
@@ -58,38 +76,37 @@ class DataValidator:
 
         for pattern in LOW_QUALITY_PATTERNS:
             if pattern in content_lower or pattern in title_lower:
-                return False
+                return False, "low_quality_pattern"
 
         # Check for repetitive content
         words = content.split()
         if len(words) > 0:
             unique_ratio = len(set(words)) / len(words)
             if unique_ratio < 0.3:  # Too many repeated words
-                return False
+                return False, "repetitive_content"
 
         # Check for suspiciously short sentences
-        sentences = content.split('.')
+        sentences = content.split(".")
         if len(sentences) > 1:
-            avg_sentence_length = sum(len(s.split())
-                                      for s in sentences) / len(sentences)
+            avg_sentence_length = sum(len(s.split()) for s in sentences) / len(
+                sentences
+            )
             if avg_sentence_length < 3:
-                return False
+                return False, "short_sentences"
 
         # Check if article has meaningful symbols
         symbols = article.get("symbols", [])
         if not symbols:
             # Look for potential ticker symbols in content
-            potential_tickers = re.findall(
-                r'\b[A-Z]{2,5}\b', content + " " + title)
+            potential_tickers = re.findall(r"\b[A-Z]{2,5}\b", content + " " + title)
             if len(potential_tickers) < 1:
-                return False
+                return False, "no_symbols"
 
-        return True
+        return True, "valid"
 
-    def detect_near_duplicates(self,
-                               article: Dict,
-                               existing_articles: List[Dict],
-                               check_last_n: int = 100) -> bool:
+    def detect_near_duplicates(
+        self, article: Dict, existing_articles: List[Dict], check_last_n: int = 100
+    ) -> bool:
         """
         Simple duplicate detection based on title and content similarity
 
@@ -105,8 +122,11 @@ class DataValidator:
         new_content = article.get("content", "").lower().strip()
 
         # Check against last N articles for efficiency
-        check_articles = existing_articles[-check_last_n:] if len(
-            existing_articles) > check_last_n else existing_articles
+        check_articles = (
+            existing_articles[-check_last_n:]
+            if len(existing_articles) > check_last_n
+            else existing_articles
+        )
 
         for existing in check_articles:
             existing_title = existing.get("title", "").lower().strip()
@@ -118,7 +138,8 @@ class DataValidator:
                 title_words_existing = set(existing_title.split())
                 if title_words_new and title_words_existing:
                     title_similarity = len(
-                        title_words_new & title_words_existing) / max(len(title_words_new), 1)
+                        title_words_new & title_words_existing
+                    ) / max(len(title_words_new), 1)
                     if title_similarity > 0.8:
                         return True
 
@@ -126,8 +147,9 @@ class DataValidator:
             new_words = set(new_content.split()[:200])
             existing_words = set(existing_content.split()[:200])
             if new_words and existing_words:
-                content_similarity = len(
-                    new_words & existing_words) / len(new_words | existing_words)
+                content_similarity = len(new_words & existing_words) / len(
+                    new_words | existing_words
+                )
                 if content_similarity > self.config["max_duplicate_threshold"]:
                     return True
 
@@ -167,6 +189,7 @@ class DataValidator:
         try:
             # Try common date formats
             from datetime import datetime
+
             for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"]:
                 try:
                     datetime.strptime(date_str, fmt)
