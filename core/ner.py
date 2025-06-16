@@ -25,10 +25,12 @@ logger = logging.getLogger(__name__)
 _SYMBOL_CACHE = {}
 
 # Updated regex patterns for ticker detection
-TICKER_PATTERN = re.compile(r"\b[A-Z]{1,5}\b")
+# Matches single-letter and multi-letter tickers
+TICKER_PATTERN = re.compile(r"\b[A-Z]{1,5}\b", re.IGNORECASE)
 MULTI_WORD_TICKER_PATTERN = re.compile(
-    r"\b[A-Z]{1,5}(?:\.[A-Z])?\b")  # Handles BRK.B
-PARENTHETICAL_PATTERN = re.compile(r"\(([A-Z]{1,5}(?:\.[A-Z])?)\)")
+    r"\b[A-Z]{1,5}(?:\.[A-Z])?\b", re.IGNORECASE)  # Handles BRK.B
+PARENTHETICAL_PATTERN = re.compile(
+    r"\(([A-Z]{1,5}(?:\.[A-Z])?)\)", re.IGNORECASE)
 EXCHANGE_PATTERN = re.compile(
     r"\b([A-Z]{2,5}(?:\.[A-Z])?)\s+(?:on|traded\s+on|listed\s+on)\s+(?:NYSE|NASDAQ|the\s+exchange)",
     re.IGNORECASE

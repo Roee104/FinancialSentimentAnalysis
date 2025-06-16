@@ -29,7 +29,7 @@ INPUT_PARQUET = DATA_DIR / "financial_news_2020_2025_100k.parquet"
 PROCESSED_OUTPUT = DATA_DIR / "processed_articles.jsonl"
 
 # API Configuration
-EODHD_API_TOKEN = os.getenv("EODHD_API_TOKEN", "68442677069401.89798760")
+EODHD_API_TOKEN = os.getenv("EODHD_API_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Data Collection Settings

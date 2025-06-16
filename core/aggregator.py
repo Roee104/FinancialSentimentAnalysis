@@ -13,6 +13,8 @@ from difflib import SequenceMatcher
 import json
 from pathlib import Path
 import time
+from rapidfuzz import fuzz
+
 
 from config.settings import SENTIMENT_CONFIG, DATA_DIR, SECTOR_CACHE_FILE, NER_CONFIG
 
@@ -148,19 +150,20 @@ class Aggregator:
         """
         Find all mentions of a ticker/company in a chunk with positions
 
-        Args:
-            chunk: Text chunk
-            ticker: Ticker symbol
-            company_name: Optional company name
-
-        Returns:
-            List of dicts with mention info (text, position, confidence)
+        Returns a list of dictionaries:
+            {
+              "text": str,          # matched text
+              "position": int,      # character index within chunk
+              "length": int,
+              "confidence": float,  # 0-1
+              "type": str           # ticker | company_full | company_partial
+            }
         """
-        mentions = []
+        mentions: List[Dict] = []
         chunk_lower = chunk.lower()
         chunk_upper = chunk.upper()
 
-        # Find ticker symbol mentions
+        # ---- 1. exact ticker symbol  -----------------------------------
         ticker_pattern = r"\b" + re.escape(ticker) + r"\b"
         for match in re.finditer(ticker_pattern, chunk_upper):
             mentions.append(
@@ -168,15 +171,16 @@ class Aggregator:
                     "text": ticker,
                     "position": match.start(),
                     "length": len(ticker),
-                    "confidence": 0.9,
+                    "confidence": 0.90,
                     "type": "ticker",
                 }
             )
 
-        # Find company name mentions
+        # ---- 2. company name (exact + fuzzy) ---------------------------
         if company_name:
-            # Full company name
             company_lower = company_name.lower()
+
+            # 2-a full company name (exact substring)
             if company_lower in chunk_lower:
                 pos = chunk_lower.find(company_lower)
                 mentions.append(
@@ -184,26 +188,30 @@ class Aggregator:
                         "text": company_name,
                         "position": pos,
                         "length": len(company_name),
-                        "confidence": 0.8,
+                        "confidence": 0.80,
                         "type": "company_full",
                     }
                 )
 
-            # Partial company name (first 2-3 words)
-            company_words = company_name.split()
-            if len(company_words) >= 2:
-                partial_name = " ".join(company_words[:2]).lower()
-                if partial_name in chunk_lower and len(partial_name) > 5:
-                    pos = chunk_lower.find(partial_name)
-                    mentions.append(
-                        {
-                            "text": partial_name,
-                            "position": pos,
-                            "length": len(partial_name),
-                            "confidence": 0.6,
-                            "type": "company_partial",
-                        }
-                    )
+            # 2-b fuzzy / partial match using rapidfuzz
+            #     Only attempt if company name ≥ 2 words
+            similarity = fuzz.partial_ratio(company_lower, chunk_lower)
+            if similarity > 85:  # 85 % similarity threshold
+                company_words = company_name.split()
+                if len(company_words) >= 2:
+                    partial_name = " ".join(company_words[:2]).lower()
+
+                    if partial_name in chunk_lower and len(partial_name) > 5:
+                        pos = chunk_lower.find(partial_name)
+                        mentions.append(
+                            {
+                                "text": partial_name,
+                                "position": pos,
+                                "length": len(partial_name),
+                                "confidence": 0.60 * (similarity / 100.0),
+                                "type": "company_partial",
+                            }
+                        )
 
         return mentions
 

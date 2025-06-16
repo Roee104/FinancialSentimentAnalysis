@@ -1,41 +1,64 @@
-# virtual env
+# ─────────────────────────  ENV & VIRTUAL ENVS ──────────────────────────
 .venv/
-
-# dotenv
 .env
 
-# Ignore large dataset files
-data/*.parquet
 
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
+# ─────────────────────────  PYTHON BUILD ARTEFACTS ──────────────────────
+__pycache__/          # compiled byte-code dirs
+**/__pycache__/       # nested (defensive)
+*.pyc
+*.pyo
+*.pyd
+*.so                  # C-extensions on Linux
+*.dylib               # C-extensions on macOS
+*.egg-info/           # setuptools metadata
+*.dist-info/          # pip-installed pkg metadata
+build/
+dist/
 
-# Data files (too large for GitHub)
+# ─────────────────────────  DATA & OUTPUT ARTEFACTS ─────────────────────
 data/*.parquet
 data/financial_news_2020_2025_100k.parquet
 data/processed_articles*.jsonl
+data/processed_*.jsonl
 data/outputs/
 data/checkpoints/
+data/checkpoints/       # (deduplicated but keep here for clarity)
+data/article_length_stats.json
+data/evaluation_results.json
+data/sector_cache.*   # cached sector table (csv/json)
 
-# Results (optional - you may want to keep some)
+# Plots / figures
 data/plots/*.png
+
+# CSVs / intermediate stats
 data/*.csv
 data/results/
 
-# IDE
+# ─────────────────────────  DEV / TEST CACHE DIRS ───────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─────────────────────────  JUPYTER NOTEBOOKS ───────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*.ipynb               # ignore notebooks entirely (if you don’t want them tracked)
+
+# ─────────────────────────  IDE & EDITOR JUNK ───────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
+# ─────────────────────────  OS-SPECIFIC TRASH ───────────────────────────
 .DS_Store
 Thumbs.db
 
-# Logs
+# ─────────────────────────  LOGS & TEMP FILES ───────────────────────────
 *.log
-
-# Temporary files
 *.tmp
 *.bak
+

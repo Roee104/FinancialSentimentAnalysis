@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="Run Financial Sentiment Analysis Pipeline"
+        description="Run Financial Sentiment Analysis Pipeline",
+        allow_abbrev=False  # Disable abbreviation to avoid conflicts
     )
 
     # Config file

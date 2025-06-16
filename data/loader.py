@@ -576,12 +576,7 @@ class DataLoader:
 # Main collection function for backward compatibility
 def main():
     """Run data collection"""
-    # Setup logging from config
-    import logging.config
-    from config.settings import LOGGING_CONFIG
-
-    logging.config.dictConfig(LOGGING_CONFIG)
-
+    
     # Load config
     from utils.config_loader import load_config
 
@@ -634,6 +629,3 @@ def main():
     logger.info(f"\nToken count statistics:")
     logger.info(df["token_count"].describe())
 
-
-if __name__ == "__main__":
-    main()
