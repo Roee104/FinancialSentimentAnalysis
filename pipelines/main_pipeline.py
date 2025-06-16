@@ -1,4 +1,4 @@
-# pipelines/main_pipeline.py
+
 """
 Main pipeline implementation for financial sentiment analysis
 """
@@ -84,6 +84,9 @@ class OptimizedPipeline(FinancialSentimentPipeline):
     """Optimized pipeline with bias correction"""
 
     def __init__(self, **kwargs):
+        # Remove use_distance_weighting from kwargs if present
+        kwargs.pop('use_distance_weighting', None)
+
         super().__init__(
             sentiment_mode="optimized",
             aggregation_method="conf_weighted",
@@ -97,6 +100,9 @@ class StandardPipeline(FinancialSentimentPipeline):
     """Standard pipeline without optimizations"""
 
     def __init__(self, **kwargs):
+        # Remove use_distance_weighting from kwargs if present
+        kwargs.pop('use_distance_weighting', None)
+
         super().__init__(
             sentiment_mode="standard",
             aggregation_method="default",
@@ -110,6 +116,9 @@ class CalibratedPipeline(FinancialSentimentPipeline):
     """Calibrated pipeline with advanced bias reduction"""
 
     def __init__(self, **kwargs):
+        # Remove use_distance_weighting from kwargs if present
+        kwargs.pop('use_distance_weighting', None)
+
         super().__init__(
             sentiment_mode="calibrated",
             aggregation_method="conf_weighted",

@@ -15,7 +15,6 @@ from tqdm import tqdm
 import gc
 import os
 import hashlib
-import orjson
 
 from config.settings import (
     INPUT_PARQUET, PROCESSED_OUTPUT, MASTER_TICKER_LIST,
@@ -24,6 +23,21 @@ from config.settings import (
 from utils.helpers import create_backup
 
 logger = logging.getLogger(__name__)
+
+
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    return obj
 
 
 class BasePipeline(ABC):
@@ -164,8 +178,11 @@ class BasePipeline(ABC):
 
     def _write_result(self, record: Dict):
         """Write result to buffer and flush if needed"""
-        # Use orjson for faster serialization
-        json_str = orjson.dumps(record).decode('utf-8')
+        # Convert numpy types to native Python types
+        record = convert_numpy_types(record)
+
+        # Use standard json instead of orjson to handle the conversion
+        json_str = json.dumps(record, ensure_ascii=False)
         self._output_buffer.append(json_str)
 
         # Flush buffer if full
@@ -176,7 +193,7 @@ class BasePipeline(ABC):
         """Flush output buffer to file"""
         if self._output_buffer and self._output_file:
             for line in self._output_buffer:
-                self._output_file.write(line + '\n')
+                self._output_file.write(line + '\\n')
             self._output_file.flush()
             self._output_buffer.clear()
 
@@ -219,7 +236,7 @@ class BasePipeline(ABC):
             if len(content) > TEXT_PROCESSING["max_content_length"]:
                 content = content[:TEXT_PROCESSING["max_content_length"]]
 
-            full_text = f"{title}\n\n{content}"
+            full_text = f"{title}\\n\\n{content}"
 
             # Process text into chunks
             chunks = self.text_processor.split_to_chunks(full_text)
@@ -268,13 +285,14 @@ class BasePipeline(ABC):
             total_assigned = sum(result['chunk_assignments'].values())
             self.stats['total_chunks_assigned'] += total_assigned
 
-            # Build final record
+            # Build final record - ensure all values are JSON serializable
             record = {
                 "date": date.isoformat() if hasattr(date, "isoformat") else str(date),
                 "title": title[:500],  # Limit title length
                 "content": content[:1000],  # Store truncated content
                 "article_hash": article_hash,
                 "overall_sentiment": result['overall_sentiment'],
+                # Ensure float
                 "overall_confidence": float(result['overall_confidence']),
                 "tickers": result['ticker_sentiments'],
                 "sectors": result['sector_sentiments'],
@@ -282,6 +300,9 @@ class BasePipeline(ABC):
                 "chunk_count": len(chunks),
                 "chunks_assigned": result['chunk_assignments']
             }
+
+            # Final conversion to ensure all nested values are JSON serializable
+            record = convert_numpy_types(record)
 
             return record
 
@@ -402,7 +423,7 @@ class BasePipeline(ABC):
 
     def _print_final_report(self):
         """Print final statistics"""
-        print("\n" + "="*50)
+        print("\\n" + "="*50)
         print("📊 PIPELINE STATISTICS")
         print("="*50)
         print(f"New articles processed: {self.stats['processed']}")
@@ -413,19 +434,19 @@ class BasePipeline(ABC):
         print(f"Errors: {self.stats['errors']}")
 
         if self.stats['processed'] > 0:
-            print("\nSentiment Distribution:")
+            print("\\nSentiment Distribution:")
             total = self.stats['processed']
             for sentiment, count in self.stats['sentiment_dist'].items():
                 pct = count / total * 100 if total > 0 else 0
                 print(f"  {sentiment}: {count} ({pct:.1f}%)")
 
-            print(f"\nTicker Coverage:")
+            print(f"\\nTicker Coverage:")
             print(f"  Articles with tickers: {self.stats['articles_with_tickers']} " +
                   f"({self.stats['articles_with_tickers']/total*100:.1f}%)")
             print(f"  Average tickers/article: " +
                   f"{self.stats['total_tickers_found']/total:.2f}")
 
-            print(f"\nContext-Aware Assignment:")
+            print(f"\\nContext-Aware Assignment:")
             print(
                 f"  Total chunks assigned: {self.stats['total_chunks_assigned']}")
             print(f"  Average chunks assigned/article: " +
@@ -435,13 +456,13 @@ class BasePipeline(ABC):
         if self.ner:
             ner_stats = self.ner.get_extraction_stats()
             if ner_stats:
-                print("\nNER Extraction Methods:")
+                print("\\nNER Extraction Methods:")
                 for method, count in sorted(ner_stats.items(),
                                             key=lambda x: x[1],
                                             reverse=True)[:10]:
                     print(f"  {method}: {count}")
 
-        print(f"\n✅ Pipeline completed! Results: {self.output_path}")
+        print(f"\\n✅ Pipeline completed! Results: {self.output_path}")
 
     def _save_checkpoint(self, batch_idx: int):
         """Save checkpoint"""
@@ -460,7 +481,7 @@ class BasePipeline(ABC):
 
     def _run_component_tests(self):
         """Run basic tests on pipeline components"""
-        logger.info("\n🧪 Running component tests...")
+        logger.info("\\n🧪 Running component tests...")
 
         test_results = []
 
@@ -483,7 +504,7 @@ class BasePipeline(ABC):
         passed = sum(1 for _, result in test_results if result)
         total = len(test_results)
 
-        logger.info(f"\nTest Summary: {passed}/{total} passed")
+        logger.info(f"\\nTest Summary: {passed}/{total} passed")
         for test_name, result in test_results:
             status = "✅" if result else "❌"
             logger.info(f"{status} {test_name}")

@@ -1,0 +1,27 @@
+
+# Production configuration for full data collection
+data_collection:
+  target_per_tag: 2000  # Full target
+  batch_size: 500
+  max_retries: 5
+  max_pages_per_tag: 50
+  duplicate_check_window: 1000
+  sleep_sec: 0.5  # Slightly longer delay for API courtesy
+
+sentiment_config:
+  batch_size: 32  # Larger batch for faster processing
+  max_length: 256  # Reduced for memory efficiency
+
+pipeline_config:
+  batch_size: 100
+  sentiment_batch_size: 32
+  checkpoint_interval: 5  # More frequent checkpoints
+  buffer_size: 200
+
+logging_config:
+  handlers:
+    console:
+      level: "INFO"
+    file:
+      level: "DEBUG"
+      filename: "data/production_run.log"
