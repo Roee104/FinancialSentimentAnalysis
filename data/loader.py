@@ -31,6 +31,7 @@ from config.settings import (
     DATA_DIR,
     CHECKPOINTS_DIR,
     QUALITY_FILTER_STATS,
+    CACHE_DIR,
 )
 from data.validator import DataValidator
 
@@ -49,13 +50,19 @@ class NewsDataCollector:
             config: Configuration dict (uses settings if None)
         """
         self.api_token = api_token or EODHD_API_TOKEN
+        if not self.api_token:
+            raise ValueError(
+                "EODHD_API_TOKEN not set. Please set it in your environment or .env file")
+
         self.config = config or DATA_COLLECTION
         self.validator = DataValidator()
 
         # Initialize tokenizer for token counting
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
-                MODELS["bert_tokenizer"])
+                MODELS["bert_tokenizer"],
+                cache_dir=MODELS.get("cache_dir", CACHE_DIR / "models")
+            )
         except Exception as e:
             logger.warning(f"Could not load tokenizer: {e}")
             self.tokenizer = None
@@ -79,6 +86,9 @@ class NewsDataCollector:
         # State persistence
         self.state_dir = CHECKPOINTS_DIR / "crawler_state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
+
+        # CSV for quality filter stats
+        self.stats_file = DATA_DIR / "quality_filter_stats.csv"
 
         logger.info("Initialized NewsDataCollector")
 
@@ -111,6 +121,23 @@ class NewsDataCollector:
                 json.dump(state, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save state for {tag}: {e}")
+
+    def _save_quality_stats(self):
+        """Save quality filter statistics to CSV"""
+        try:
+            stats_df = pd.DataFrame([
+                {
+                    'reason': reason,
+                    'count': count,
+                    'percentage': count / self.quality_stats['total_fetched'] * 100
+                    if self.quality_stats['total_fetched'] > 0 else 0
+                }
+                for reason, count in self.quality_stats['filter_reasons'].items()
+            ])
+            stats_df.to_csv(self.stats_file, index=False)
+            logger.info(f"Saved quality stats to {self.stats_file}")
+        except Exception as e:
+            logger.error(f"Failed to save quality stats: {e}")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
     def fetch_page(self, tag: str, offset: int) -> Optional[List[Dict]]:
@@ -233,10 +260,9 @@ class NewsDataCollector:
                     if article_hash in tag_collected:
                         continue
 
-                    # Quality validation with reason tracking
+                    # Quality validation with reason tracking using validator
                     is_valid, reason = self.validator.validate_article_quality_with_reason(
-                        art
-                    )
+                        art)
                     if not is_valid:
                         self.quality_stats["quality_filtered"] += 1
                         self.quality_stats["filter_reasons"][reason] += 1
@@ -249,12 +275,17 @@ class NewsDataCollector:
                         tag_duplicate_filtered += 1
                         continue
 
+                    # Validate and clean symbols
+                    raw_symbols = art.get("symbols", [])
+                    clean_symbols = self.validator.validate_symbols(
+                        raw_symbols)
+
                     # Add valid article
                     article_data = {
                         "date": art.get("date"),
                         "title": art.get("title", ""),
                         "content": art.get("content", ""),
-                        "symbols": art.get("symbols", []),
+                        "symbols": clean_symbols,
                         "tags": art.get("tags", []),
                         "sentiment": art.get("sentiment", {}),
                         "tag_source": tag,
@@ -337,8 +368,7 @@ class NewsDataCollector:
         logger.info(f"🚀 Starting data collection for {len(tags)} tags...")
         logger.info(f"Target per tag: {self.config['target_per_tag']}")
         logger.info(
-            f"Date range: {self.config['from_date']} to {self.config['to_date']}"
-        )
+            f"Date range: {self.config['from_date']} to {self.config['to_date']}")
 
         for tag_idx, tag in enumerate(tags, 1):
             logger.info(f"\n[{tag_idx}/{len(tags)}] {tag}")
@@ -349,6 +379,7 @@ class NewsDataCollector:
             # Save checkpoint
             if tag_idx % checkpoint_interval == 0:
                 self.save_checkpoint(all_articles, f"tags_1_to_{tag_idx}")
+                self._save_quality_stats()  # Save stats after each checkpoint
 
         # Final statistics
         self.quality_stats["final_count"] = len(all_articles)
@@ -356,11 +387,9 @@ class NewsDataCollector:
         logger.info(
             f"Total articles fetched: {self.quality_stats['total_fetched']}")
         logger.info(
-            f"Quality filtered out: {self.quality_stats['quality_filtered']}"
-        )
+            f"Quality filtered out: {self.quality_stats['quality_filtered']}")
         logger.info(
-            f"Duplicates filtered out: {self.quality_stats['duplicate_filtered']}"
-        )
+            f"Duplicates filtered out: {self.quality_stats['duplicate_filtered']}")
         logger.info(
             f"Final collection size: {self.quality_stats['final_count']}")
 
@@ -368,12 +397,16 @@ class NewsDataCollector:
         logger.info("\nQuality filter breakdown:")
         for reason, count in self.quality_stats["filter_reasons"].items():
             if count > 0:
-                logger.info(f"  {reason}: {count}")
+                pct = count / self.quality_stats['total_fetched'] * \
+                    100 if self.quality_stats['total_fetched'] > 0 else 0
+                logger.info(f"  {reason}: {count} ({pct:.1f}%)")
 
         if self.quality_stats["failed_tags"]:
             logger.warning(
-                f"Failed tags: {', '.join(self.quality_stats['failed_tags'])}"
-            )
+                f"Failed tags: {', '.join(self.quality_stats['failed_tags'])}")
+
+        # Save final quality stats
+        self._save_quality_stats()
 
         return all_articles
 
@@ -400,6 +433,14 @@ class NewsDataCollector:
             else:
                 full_text = art["title"] + "\n\n" + art["content"]
                 art["token_count"] = len(full_text.split())
+
+            # Validate sentiment scores if present
+            if "sentiment" in art and isinstance(art["sentiment"], dict):
+                if not self.validator.validate_sentiment_scores(art["sentiment"]):
+                    logger.warning(
+                        f"Invalid sentiment scores for article {art.get('article_hash', 'unknown')}")
+                    # Default to neutral
+                    art["sentiment"] = {"pos": 0.0, "neu": 1.0, "neg": 0.0}
 
         # Build DataFrame
         df = pd.DataFrame(articles)
@@ -476,7 +517,7 @@ class NewsDataCollector:
                 mock_response.json.return_value = [
                     {
                         "title": "Test Article",
-                        "content": "Test content",
+                        "content": "Test content with enough words " * 20,  # Make it pass validation
                         "link": "http://test.com/1",
                         "date": "2024-01-01",
                         "symbols": ["AAPL"],
@@ -556,8 +597,10 @@ class DataLoader:
     @staticmethod
     def test_jsonl_io():
         """Test JSONL I/O functionality"""
-        test_data = [{"id": 1, "text": "test article 1"},
-                     {"id": 2, "text": "test article 2"}]
+        test_data = [
+            {"id": 1, "text": "test article 1"},
+            {"id": 2, "text": "test article 2"}
+        ]
         test_file = Path("/tmp/test_loader.jsonl")
 
         try:
@@ -573,51 +616,67 @@ class DataLoader:
             return False
 
 
-# Main collection function for backward compatibility
+# Main collection function
 def main():
     """Run data collection"""
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Collect financial news data")
+    parser.add_argument('--config', type=str, help='Path to YAML config file')
+    parser.add_argument('--tags', nargs='+', help='Custom tags to collect')
+    parser.add_argument('--output', type=Path,
+                        default=DATA_DIR / "financial_news_2020_2025_100k.parquet",
+                        help='Output parquet file')
+    parser.add_argument('--test', action='store_true', help='Run tests only')
+
+    args = parser.parse_args()
+
     # Load config
     from utils.config_loader import load_config
+    config = load_config(args.config)
 
-    config = load_config()
+    # Initialize collector
+    try:
+        collector = NewsDataCollector(config=config.get("data_collection"))
+    except ValueError as e:
+        logger.error(str(e))
+        return 1
 
-    collector = NewsDataCollector(config=config.get("data_collection"))
-
-    # Run tests first
-    logger.info("Running data loader tests...")
-    collector.test_fetch_page()
-    DataLoader.test_jsonl_io()
+    # Run tests if requested
+    if args.test:
+        logger.info("Running data loader tests...")
+        collector.test_fetch_page()
+        DataLoader.test_jsonl_io()
+        return 0
 
     # Collect articles
-    articles = collector.collect_all_articles()
+    tags = args.tags or config.get("collection_tags", COLLECTION_TAGS)
+    articles = collector.collect_all_articles(tags=tags)
 
     if not articles:
         logger.error("No articles collected")
-        return
+        return 1
 
     # Process to DataFrame
     df = collector.process_for_dataset(articles)
 
     # Save to parquet
-    output_file = Path(
-        config.get("input_parquet", DATA_DIR /
-                   "financial_news_2020_2025_100k.parquet")
-    )
-    df.to_parquet(output_file, index=False)
-    logger.info(f"✅ Dataset saved to {output_file}")
+    df.to_parquet(args.output, index=False)
+    logger.info(f"✅ Dataset saved to {args.output}")
 
     # Save metadata
     metadata = {
         "collection_date": datetime.now().isoformat(),
         "total_articles": len(df),
         "date_range": f"{config['data_collection']['from_date']} to {config['data_collection']['to_date']}",
-        "tags_used": config.get("collection_tags", COLLECTION_TAGS),
+        "tags_used": tags,
         "quality_stats": collector.quality_stats,
         "columns": list(df.columns),
+        "sentiment_distribution": df["sentiment_label"].value_counts().to_dict(),
+        "avg_token_count": float(df["token_count"].mean()),
     }
 
-    metadata_file = DATA_DIR / "collection_metadata.json"
+    metadata_file = args.output.parent / f"{args.output.stem}_metadata.json"
     with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     logger.info(f"✅ Metadata saved to {metadata_file}")
@@ -629,3 +688,8 @@ def main():
     logger.info(f"\nToken count statistics:")
     logger.info(df["token_count"].describe())
 
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())

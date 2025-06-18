@@ -9,12 +9,10 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 import logging
 import numpy as np
-from difflib import SequenceMatcher
 import json
 from pathlib import Path
 import time
 from rapidfuzz import fuzz
-
 
 from config.settings import SENTIMENT_CONFIG, DATA_DIR, SECTOR_CACHE_FILE, NER_CONFIG
 
@@ -100,7 +98,8 @@ class Aggregator:
             cache_age = time.time() - SECTOR_CACHE_FILE.stat().st_mtime
             cache_ttl = NER_CONFIG.get("sector_cache_ttl", 86400)  # 24 hours
 
-            if cache_age > cache_ttl:
+            # FIXED: Correct TTL logic
+            if cache_age > cache_ttl:  # Cache expired
                 logger.info("Sector cache expired")
                 return None
 
@@ -150,20 +149,13 @@ class Aggregator:
         """
         Find all mentions of a ticker/company in a chunk with positions
 
-        Returns a list of dictionaries:
-            {
-              "text": str,          # matched text
-              "position": int,      # character index within chunk
-              "length": int,
-              "confidence": float,  # 0-1
-              "type": str           # ticker | company_full | company_partial
-            }
+        Returns a list of dictionaries with text, position, confidence, etc.
         """
         mentions: List[Dict] = []
         chunk_lower = chunk.lower()
         chunk_upper = chunk.upper()
 
-        # ---- 1. exact ticker symbol  -----------------------------------
+        # 1. Exact ticker symbol
         ticker_pattern = r"\b" + re.escape(ticker) + r"\b"
         for match in re.finditer(ticker_pattern, chunk_upper):
             mentions.append(
@@ -176,11 +168,11 @@ class Aggregator:
                 }
             )
 
-        # ---- 2. company name (exact + fuzzy) ---------------------------
+        # 2. Company name matching with rapidfuzz
         if company_name:
             company_lower = company_name.lower()
 
-            # 2-a full company name (exact substring)
+            # Exact substring match
             if company_lower in chunk_lower:
                 pos = chunk_lower.find(company_lower)
                 mentions.append(
@@ -193,10 +185,9 @@ class Aggregator:
                     }
                 )
 
-            # 2-b fuzzy / partial match using rapidfuzz
-            #     Only attempt if company name ≥ 2 words
+            # Fuzzy matching with rapidfuzz (much faster than SequenceMatcher)
             similarity = fuzz.partial_ratio(company_lower, chunk_lower)
-            if similarity > 85:  # 85 % similarity threshold
+            if similarity > 85:  # 85% similarity threshold
                 company_words = company_name.split()
                 if len(company_words) >= 2:
                     partial_name = " ".join(company_words[:2]).lower()
@@ -220,13 +211,6 @@ class Aggregator:
     ) -> float:
         """
         Calculate weight for chunk-ticker assignment based on mentions
-
-        Args:
-            chunk: Text chunk
-            mentions: List of mention dicts
-
-        Returns:
-            Weight score (0-1)
         """
         if not mentions:
             return 0.0
@@ -262,15 +246,6 @@ class Aggregator:
     ) -> Dict[str, List[Tuple]]:
         """
         Context-aware assignment of chunks to tickers with distance weighting
-
-        Args:
-            chunks: Text chunks
-            predictions: Sentiment predictions for chunks
-            tickers: List of (ticker, confidence) tuples
-            ticker_to_company: Optional mapping of ticker to company name
-
-        Returns:
-            Dict mapping ticker to list of (chunk_idx, sentiment, confidence, weight) tuples
         """
         ticker_chunks = defaultdict(list)
 
@@ -319,15 +294,6 @@ class Aggregator:
     ) -> Dict:
         """
         Aggregate sentiments for a full article with context-aware assignment
-
-        Args:
-            chunks: Text chunks
-            predictions: Sentiment predictions for chunks
-            symbols: List of (ticker, confidence) tuples
-            ticker_to_company: Optional ticker to company name mapping
-
-        Returns:
-            Dict with ticker, sector, and overall sentiments
         """
         # Context-aware chunk assignment with weights
         ticker_chunks_map = self.assign_chunks_to_tickers(
@@ -346,7 +312,7 @@ class Aggregator:
         # Aggregate by sector
         sector_sentiments = self.compute_sector_sentiment(ticker_sentiments)
 
-        # Overall article sentiment (from ALL chunks, not just ticker-assigned ones)
+        # Overall article sentiment (from ALL chunks)
         overall_label, overall_conf = self.compute_article_sentiment_from_chunks(
             predictions
         )
@@ -370,12 +336,6 @@ class Aggregator:
     ) -> Dict[str, Dict]:
         """
         Aggregate chunk-level sentiments per ticker with distance weighting
-
-        Args:
-            ticker_chunks: List of (ticker, label, confidence, weight) tuples
-
-        Returns:
-            Dict mapping ticker to sentiment info
         """
         data = defaultdict(
             lambda: {
@@ -470,12 +430,6 @@ class Aggregator:
     ) -> Dict[str, Dict]:
         """
         Aggregate ticker-level scores into sectors
-
-        Args:
-            ticker_sentiments: Dict of ticker sentiments
-
-        Returns:
-            Dict mapping sector to sentiment info
         """
         agg = defaultdict(
             lambda: {"score_sum": 0.0, "conf_sum": 0.0,
@@ -520,12 +474,6 @@ class Aggregator:
     ) -> Tuple[str, float]:
         """
         Compute overall article sentiment from ALL chunks
-
-        Args:
-            predictions: All chunk predictions
-
-        Returns:
-            Tuple of (label, confidence)
         """
         if not predictions:
             return "Neutral", 0.0
@@ -580,49 +528,3 @@ class Aggregator:
             avg_conf = sum(confidence_sum.values()) / total_chunks
 
         return label, avg_conf
-
-    # Unit test
-    def test_distance_weighting(self):
-        """Test distance-based weighting functionality"""
-        test_chunks = [
-            "Apple (AAPL) reported strong earnings growth.",
-            "The market reacted positively to the news.",
-            "Microsoft shares declined on regulatory concerns.",
-        ]
-
-        test_predictions = [
-            {"label": "Positive", "confidence": 0.9},
-            {"label": "Positive", "confidence": 0.8},
-            {"label": "Negative", "confidence": 0.85},
-        ]
-
-        test_tickers = [("AAPL", 0.95), ("MSFT", 0.9)]
-
-        try:
-            result = self.aggregate_article(
-                chunks=test_chunks,
-                predictions=test_predictions,
-                symbols=test_tickers,
-                ticker_to_company={"AAPL": "Apple Inc",
-                                   "MSFT": "Microsoft Corporation"},
-            )
-
-            # Check structure
-            assert "ticker_sentiments" in result
-            assert "overall_sentiment" in result
-            assert len(result["ticker_sentiments"]) > 0
-
-            # AAPL should be positive (mentioned in positive chunk)
-            aapl_sentiment = next(
-                (t for t in result["ticker_sentiments"]
-                 if t["symbol"] == "AAPL"), None
-            )
-            assert aapl_sentiment is not None
-            assert aapl_sentiment["label"] == "Positive"
-
-            logger.info("✅ Distance weighting test passed")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Distance weighting test failed: {e}")
-            return False

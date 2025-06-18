@@ -81,6 +81,12 @@ def main():
         help="Aggregation method",
     )
     parser.add_argument(
+        "--agg-method",
+        type=str,
+        choices=["default", "majority", "conf_weighted"],
+        help="Aggregation method (alias for --method)",
+    )
+    parser.add_argument(
         "--threshold", type=float, help="Threshold for sentiment classification"
     )
     parser.add_argument(
@@ -151,6 +157,8 @@ def main():
             # Add optional overrides
             if args.sentiment_mode:
                 kwargs["sentiment_mode"] = args.sentiment_mode
+            if args.agg_method:
+                kwargs["aggregation_method"] = args.agg_method
             if args.method:
                 kwargs["aggregation_method"] = args.method
             if args.threshold is not None:

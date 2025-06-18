@@ -1,64 +1,63 @@
-# ─────────────────────────  ENV & VIRTUAL ENVS ──────────────────────────
-.venv/
+# ─────────────────────────  ENV & SECRETS ───────────────────────────
 .env
+.env.*
+.venv/
+venv/
+env/
 
-
-# ─────────────────────────  PYTHON BUILD ARTEFACTS ──────────────────────
-__pycache__/          # compiled byte-code dirs
-**/__pycache__/       # nested (defensive)
-*.pyc
-*.pyo
-*.pyd
-*.so                  # C-extensions on Linux
-*.dylib               # C-extensions on macOS
-*.egg-info/           # setuptools metadata
-*.dist-info/          # pip-installed pkg metadata
+# ─────────────────────────  PYTHON BUILD ARTIFACTS ──────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.egg-info/
+*.dist-info/
 build/
 dist/
-
-# ─────────────────────────  DATA & OUTPUT ARTEFACTS ─────────────────────
-data/*.parquet
-data/financial_news_2020_2025_100k.parquet
-data/processed_articles*.jsonl
-data/processed_*.jsonl
-data/outputs/
-data/checkpoints/
-data/checkpoints/       # (deduplicated but keep here for clarity)
-data/article_length_stats.json
-data/evaluation_results.json
-data/sector_cache.*   # cached sector table (csv/json)
-
-# Plots / figures
-data/plots/*.png
-
-# CSVs / intermediate stats
-data/*.csv
-data/results/
-
-# ─────────────────────────  DEV / TEST CACHE DIRS ───────────────────────
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# ─────────────────────────  JUPYTER NOTEBOOKS ───────────────────────────
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-*.ipynb               # ignore notebooks entirely (if you don’t want them tracked)
+# ─────────────────────────  DATA & OUTPUTS ──────────────────────────
+data/*.parquet
+data/processed_*.jsonl
+data/outputs/
+data/plots/*.png
+data/checkpoints/
+data/sector_cache.*
+data/article_length_stats.json
+data/evaluation_results.json
+data/gold_standard_*.jsonl
+data/ticker_sector.csv
+!data/.gitkeep
 
-# ─────────────────────────  IDE & EDITOR JUNK ───────────────────────────
+# ─────────────────────────  MODELS & WEIGHTS ────────────────────────
+models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# ─────────────────────────  NOTEBOOKS ───────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─────────────────────────  IDE ─────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# ─────────────────────────  OS-SPECIFIC TRASH ───────────────────────────
+# ─────────────────────────  OS ──────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# ─────────────────────────  LOGS & TEMP FILES ───────────────────────────
+# ─────────────────────────  LOGS ────────────────────────────────────
 *.log
-*.tmp
-*.bak
-
+logs/
+!logs/.gitkeep

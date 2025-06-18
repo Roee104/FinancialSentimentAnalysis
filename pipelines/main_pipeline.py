@@ -22,6 +22,7 @@ class FinancialSentimentPipeline(BasePipeline):
     def __init__(self,
                  sentiment_mode: str = "optimized",
                  aggregation_method: str = "conf_weighted",
+                 agg_method: str = None,  # CLI alias
                  aggregation_threshold: float = 0.1,
                  use_distance_weighting: bool = True,
                  **kwargs):
@@ -30,7 +31,8 @@ class FinancialSentimentPipeline(BasePipeline):
 
         Args:
             sentiment_mode: Sentiment analysis mode (standard/optimized/calibrated)
-            aggregation_method: Method for aggregating sentiments
+            aggregation_method: Method for aggregating sentiments  
+            agg_method: CLI alias for aggregation_method
             aggregation_threshold: Threshold for sentiment classification
             use_distance_weighting: Whether to use distance-based weighting in aggregation
             **kwargs: Additional configuration
@@ -38,7 +40,7 @@ class FinancialSentimentPipeline(BasePipeline):
         super().__init__(**kwargs)
 
         self.sentiment_mode = sentiment_mode
-        self.aggregation_method = aggregation_method
+        self.aggregation_method = agg_method or aggregation_method
         self.aggregation_threshold = aggregation_threshold
         self.use_distance_weighting = use_distance_weighting
 
@@ -129,7 +131,7 @@ class CalibratedPipeline(FinancialSentimentPipeline):
 
 
 # Factory function for creating pipelines
-def create_pipeline(pipeline_type: str = "optimized", **kwargs) -> BasePipeline:
+def create_pipeline(pipeline_type: str = "optimized", agg_method: str = None, **kwargs) -> BasePipeline:
     """
     Factory function to create pipeline instances
 
@@ -146,6 +148,10 @@ def create_pipeline(pipeline_type: str = "optimized", **kwargs) -> BasePipeline:
         "calibrated": CalibratedPipeline,
         "main": FinancialSentimentPipeline
     }
+
+    # Handle agg_method alias
+    if agg_method and 'aggregation_method' not in kwargs:
+        kwargs['aggregation_method'] = agg_method
 
     if pipeline_type not in pipelines:
         raise ValueError(f"Unknown pipeline type: {pipeline_type}")

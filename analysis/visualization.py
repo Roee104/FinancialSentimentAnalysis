@@ -1,15 +1,16 @@
 # analysis/visualization.py
 """
-Visualization module for creating plots and charts
+Unified visualization module for creating plots and charts
 """
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional
 from pathlib import Path
 import logging
-import pandas as pd
+import json
 
 from config.settings import PLOT_CONFIG, PLOTS_DIR
 
@@ -172,13 +173,86 @@ def create_neutral_bias_plot(stats_list: List[Dict], output_dir: Path):
     plt.close()
 
 
+def create_gold_standard_evaluation_plots(results: Dict[str, Dict], output_dir: Path = None):
+    """Create evaluation plots for gold standard comparison"""
+    output_dir = output_dir or PLOTS_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    setup_plot_style()
+
+    # 1. Accuracy Comparison Bar Chart
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    pipelines = list(results.keys())
+    accuracies = [results[p]['accuracy'] * 100 for p in pipelines]
+    f1_scores = [results[p]['macro_f1'] * 100 for p in pipelines]
+
+    x = np.arange(len(pipelines))
+    width = 0.35
+
+    bars1 = ax.bar(x - width/2, accuracies, width, label='Accuracy', alpha=0.8)
+    bars2 = ax.bar(x + width/2, f1_scores, width, label='Macro F1', alpha=0.8)
+
+    ax.set_xlabel('Pipeline', fontsize=12)
+    ax.set_ylabel('Score (%)', fontsize=12)
+    ax.set_title('Pipeline Performance Comparison (Gold Standard Evaluation)',
+                 fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(pipelines)
+    ax.legend()
+    ax.set_ylim(0, 100)
+
+    # Add value labels
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.1f}%',
+                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 3),
+                        textcoords="offset points",
+                        ha='center', va='bottom')
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'gold_standard_accuracy_comparison.png',
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 2. Confusion Matrices
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.ravel()
+
+    for idx, (name, metrics) in enumerate(results.items()):
+        if idx < 4:  # Maximum 4 pipelines
+            cm = np.array(metrics['confusion_matrix'])
+
+            # Normalize confusion matrix
+            cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+            sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
+                        xticklabels=['Positive', 'Neutral', 'Negative'],
+                        yticklabels=['Positive', 'Neutral', 'Negative'],
+                        ax=axes[idx])
+            axes[idx].set_title(f'{name} Pipeline')
+            axes[idx].set_xlabel('Predicted')
+            axes[idx].set_ylabel('Actual')
+
+    plt.suptitle('Confusion Matrices (Normalized)',
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(output_dir / 'confusion_matrices.png',
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    logger.info("✅ Evaluation plots created")
+
+
 def create_performance_comparison_plot(metrics_dict: Dict[str, Dict], output_dir: Path):
     """Create performance metrics comparison plot"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
     # Sentiment accuracy plot
     methods = list(metrics_dict.keys())
-    accuracies = [metrics_dict[m].get('accuracy', 0) for m in methods]
+    accuracies = [metrics_dict[m].get('accuracy', 0) * 100 for m in methods]
 
     bars1 = ax1.bar(methods, accuracies, color='skyblue', alpha=0.7)
     ax1.set_ylabel('Accuracy (%)', fontsize=12)
@@ -196,17 +270,19 @@ def create_performance_comparison_plot(metrics_dict: Dict[str, Dict], output_dir
     width = 0.25
 
     for i, sentiment in enumerate(sentiments):
-        f1_scores = [metrics_dict[m].get(
-            f'f1_{sentiment.lower()}', 0) for m in methods]
+        f1_scores = [
+            metrics_dict[m]['per_class'][sentiment]['f1'] * 100
+            for m in methods
+        ]
         ax2.bar(x + (i-1)*width, f1_scores, width, label=sentiment)
 
-    ax2.set_ylabel('F1 Score', fontsize=12)
+    ax2.set_ylabel('F1 Score (%)', fontsize=12)
     ax2.set_xlabel('Method', fontsize=12)
     ax2.set_title('F1 Scores by Sentiment Class', fontsize=14)
     ax2.set_xticks(x)
     ax2.set_xticklabels(methods)
     ax2.legend()
-    ax2.set_ylim(0, 1)
+    ax2.set_ylim(0, 100)
 
     plt.tight_layout()
     plt.savefig(output_dir / "performance_comparison.png",
