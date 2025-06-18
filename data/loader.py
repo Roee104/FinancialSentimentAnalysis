@@ -153,6 +153,7 @@ class NewsDataCollector:
         """
         params = {
             "t": tag,
+            "s": "ALL", 
             "from": self.config["from_date"],
             "to": self.config["to_date"],
             "limit": self.config["batch_size"],

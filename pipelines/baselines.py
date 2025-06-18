@@ -7,10 +7,9 @@ import pandas as pd
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from typing import Dict, Optional
 import logging
-
+from config.settings import VADER_CONFIG
 from pipelines.base_pipeline import BasePipeline
 from core.ner import UnifiedNER
-from config.settings import VADER_CONFIG
 
 logger = logging.getLogger(__name__)
 

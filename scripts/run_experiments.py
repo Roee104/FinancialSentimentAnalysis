@@ -4,13 +4,16 @@ Run all experiments for comparison and analysis
 """
 
 from config.settings import DATA_DIR, OUTPUT_DIR
-from analysis.comparison import run_comparison
+from analysis.visualization import create_comparison_plots
+
 from scripts.run_pipeline import main as run_pipeline
 import sys
 import logging
 import time
 from pathlib import Path
 from datetime import datetime
+import json                        
+from typing import List, Tuple 
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -59,6 +62,63 @@ def run_experiment(name: str, pipeline_args: list) -> bool:
     except Exception as e:
         logger.error(f"❌ Failed: {e}")
         return False
+
+# --------------------------------------------------------------------------- #
+# Wrapper that converts jsonl-result files ➜ stats_list expected by
+# analysis.visualization.create_comparison_plots
+# --------------------------------------------------------------------------- #
+def run_comparison(
+    file_label_pairs: List[Tuple[Path, str]],
+    output_dir: Path = OUTPUT_DIR,
+) -> None:
+    """
+    Build a minimal stats_list and call create_comparison_plots().
+
+    file_label_pairs : [(Path(jsonl_file), "Human-readable label"), …]
+    """
+    stats_list = []
+
+    for fpath, label in file_label_pairs:
+        if not fpath.exists():
+            continue
+
+        pos = neu = neg = with_ticker = total = 0
+
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                rec = json.loads(line)
+                total += 1
+                sent = rec.get("overall_sentiment", "Neutral")
+                if sent == "Positive":
+                    pos += 1
+                elif sent == "Negative":
+                    neg += 1
+                else:
+                    neu += 1
+
+                if rec.get("tickers"):
+                    with_ticker += 1
+
+        if total == 0:        # skip empty files
+            continue
+
+        stats_list.append(
+            {
+                "name": label,
+                "sentiment_pct": {
+                    "Positive": pos * 100 / total,
+                    "Neutral":  neu * 100 / total,
+                    "Negative": neg * 100 / total,
+                },
+                "ticker_coverage_pct": with_ticker * 100 / total,
+            }
+        )
+
+    if len(stats_list) >= 2:
+        create_comparison_plots(stats_list, output_dir)
+        logger.info(f"✅ Comparison plots saved to {output_dir}")
+    else:
+        logger.warning("Not enough result files for comparison")
 
 
 def main():
