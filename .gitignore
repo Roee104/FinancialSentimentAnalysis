@@ -61,3 +61,6 @@ Thumbs.db
 *.log
 logs/
 !logs/.gitkeep
+
+# packaging artefacts
+*.egg-info/
