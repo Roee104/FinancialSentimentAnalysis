@@ -3,12 +3,7 @@
 Test suite for core components
 """
 
-import pytest
-from pathlib import Path
-import sys
 
-# Add project root to path
-sys.path.append(str(Path(__file__).parent.parent))
 
 from core.ner import UnifiedNER
 from core.sentiment import UnifiedSentimentAnalyzer
