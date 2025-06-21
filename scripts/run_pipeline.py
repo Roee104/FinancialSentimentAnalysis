@@ -1,188 +1,142 @@
-# scripts/run_pipeline.py
-"""
-Main entry point for running the financial sentiment analysis pipeline
-"""
-
-from utils.config_loader import load_config
-from pipelines.main_pipeline import create_pipeline
+# ────────────────────────────────────────────────────────────────────────────
+#  scripts/run_pipeline.py
+#  Main entry-point for running any Financial-Sentiment-Analysis pipeline
+# ────────────────────────────────────────────────────────────────────────────
+from __future__ import annotations
+from config.settings import PROCESSED_OUTPUT, INPUT_PARQUET
 from pipelines.baselines import VADERBaseline
-from config.settings import PROCESSED_OUTPUT, INPUT_PARQUET, LOGGING_CONFIG
-import argparse
-import logging
-import logging.config
+from pipelines.main_pipeline import create_pipeline
+from utils.config_loader import load_config
 import sys
 from pathlib import Path
+import argparse
 
-# Add project root to path
-sys.path.append(str(Path(__file__).parent.parent))
-
-
-# Setup logging ONCE at the start
+# -------------------------------------------------------  logging FIRST  ---
+import logging
+import logging.config
+from config.settings import LOGGING_CONFIG
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
+# ----------------------------------------------------------  stdlib / 3rd-party
 
-def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
+# ----------------------------------------------------------  internal imports
+
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
         description="Run Financial Sentiment Analysis Pipeline",
-        allow_abbrev=False  # Disable abbreviation to avoid conflicts
+        allow_abbrev=False,
     )
 
-    # Config file
-    parser.add_argument("--config", type=str,
-                        help="Path to YAML configuration file")
+    # Config overrides
+    p.add_argument("--config", type=str, help="YAML configuration file")
 
     # Pipeline selection
-    parser.add_argument(
+    p.add_argument(
         "--pipeline",
-        type=str,
         default="optimized",
         choices=["standard", "optimized", "calibrated", "vader"],
         help="Pipeline type to run",
     )
 
-    # Data arguments
-    parser.add_argument("--input", type=str, help="Input parquet file")
-    parser.add_argument("--output", type=str, help="Output JSONL file")
+    # Data I/O
+    p.add_argument("--input", type=str, help="Input Parquet file")
+    p.add_argument("--output", type=str, help="Output JSONL file")
 
-    # Processing arguments
-    parser.add_argument("--batch-size", type=int,
-                        help="Batch size for processing")
-    parser.add_argument(
-        "--max-articles",
-        type=int,
-        default=None,
-        help="Maximum number of articles to process",
-    )
-    parser.add_argument(
-        "--start-from", type=int, default=0, help="Starting article index"
-    )
-    parser.add_argument(
-        "--no-resume", action="store_true", help="Don't resume from existing output"
-    )
+    # Processing
+    p.add_argument("--batch-size", type=int, help="Article batch size")
+    p.add_argument("--max-articles", type=int,
+                   help="Process at most N articles")
+    p.add_argument("--start-from", type=int, default=0, help="Start index")
+    p.add_argument("--no-resume", action="store_true", help="Do not resume")
 
-    # Sentiment analysis arguments
-    parser.add_argument(
-        "--sentiment-mode",
-        type=str,
-        choices=["standard", "optimized", "calibrated"],
-        help="Override sentiment analysis mode",
-    )
-    parser.add_argument(
-        "--sentiment-batch-size", type=int, help="Batch size for sentiment model"
-    )
+    # Sentiment specifics
+    p.add_argument("--sentiment-mode",
+                   choices=["standard", "optimized", "calibrated"])
+    p.add_argument("--sentiment-batch-size", type=int)
 
-    # Aggregation arguments
-    parser.add_argument(
-        "--method",
-        type=str,
-        choices=["default", "majority", "conf_weighted"],
-        help="Aggregation method",
-    )
-    parser.add_argument(
-        "--agg-method",
-        type=str,
-        choices=["default", "majority", "conf_weighted"],
-        help="Aggregation method (alias for --method)",
-    )
-    parser.add_argument(
-        "--threshold", type=float, help="Threshold for sentiment classification"
-    )
-    parser.add_argument(
-        "--no-distance-weighting",
-        action="store_true",
-        help="Disable distance-based weighting",
-    )
+    # Aggregation
+    p.add_argument("--method", "--agg-method",
+                   dest="agg_method",
+                   choices=["default", "majority", "conf_weighted"])
+    p.add_argument("--threshold", type=float)
+    p.add_argument("--no-distance-weighting", action="store_true")
 
-    # VADER specific
-    parser.add_argument(
-        "--vader-threshold",
-        type=float,
-        default=0.05,
-        help="VADER compound score threshold",
-    )
+    # VADER
+    p.add_argument("--vader-threshold", type=float, default=0.05)
 
     # Logging
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Override logging level",
-    )
+    p.add_argument(
+        "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
-    args = parser.parse_args()
+    return p
 
-    # Override log level if requested
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    # Dynamic log level
     if args.log_level:
-        logging.getLogger().setLevel(getattr(logging, args.log_level))
+        logging.getLogger().setLevel(args.log_level)
 
-    # Load configuration
+    # ------------------------------------------------------------------ config
     config_path = Path(args.config) if args.config else None
-    config = load_config(config_path, parse_cli=False)
+    cfg = load_config(config_path, parse_cli=False)
 
-    # Apply command line overrides
+    # CLI overrides
     if args.input:
-        config["input_parquet"] = args.input
+        cfg["input_parquet"] = args.input
     if args.output:
-        config["processed_output"] = args.output
+        cfg["processed_output"] = args.output
     if args.batch_size:
-        config["pipeline_config"]["batch_size"] = args.batch_size
+        cfg["pipeline_config"]["batch_size"] = args.batch_size
     if args.sentiment_batch_size:
-        config["sentiment_config"]["batch_size"] = args.sentiment_batch_size
+        cfg["sentiment_config"]["batch_size"] = args.sentiment_batch_size
 
-    logger.info("🚀 Starting Financial Sentiment Analysis Pipeline")
-    logger.info(f"Pipeline type: {args.pipeline}")
+    logger.info(
+        "🚀 Starting Financial Sentiment Analysis Pipeline — %s", args.pipeline)
 
     try:
         if args.pipeline == "vader":
-            # Run VADER baseline
             pipeline = VADERBaseline(
-                input_path=config.get("input_parquet", INPUT_PARQUET),
-                output_path=config.get("processed_output", PROCESSED_OUTPUT),
-                batch_size=config["pipeline_config"]["batch_size"],
+                input_path=cfg.get("input_parquet", INPUT_PARQUET),
+                output_path=cfg.get("processed_output", PROCESSED_OUTPUT),
+                batch_size=cfg["pipeline_config"]["batch_size"],
                 resume=not args.no_resume,
                 vader_threshold=args.vader_threshold,
             )
         else:
-            # Create main pipeline
-            kwargs = {
-                "input_path": config.get("input_parquet", INPUT_PARQUET),
-                "output_path": config.get("processed_output", PROCESSED_OUTPUT),
-                "batch_size": config["pipeline_config"]["batch_size"],
-                "resume": not args.no_resume,
-                "use_distance_weighting": not args.no_distance_weighting,
-            }
-
-            # Add optional overrides
+            kwargs = dict(
+                input_path=cfg.get("input_parquet", INPUT_PARQUET),
+                output_path=cfg.get("processed_output", PROCESSED_OUTPUT),
+                batch_size=cfg["pipeline_config"]["batch_size"],
+                resume=not args.no_resume,
+                use_distance_weighting=not args.no_distance_weighting,
+            )
             if args.sentiment_mode:
                 kwargs["sentiment_mode"] = args.sentiment_mode
             if args.agg_method:
                 kwargs["aggregation_method"] = args.agg_method
-            if args.method:
-                kwargs["aggregation_method"] = args.method
             if args.threshold is not None:
                 kwargs["aggregation_threshold"] = args.threshold
 
             pipeline = create_pipeline(args.pipeline, **kwargs)
 
-        # Run pipeline
-        pipeline.run(
-            max_articles=args.max_articles, start_from=args.start_from
-        )
-
-        logger.info("✅ Pipeline completed successfully!")
+        pipeline.run(max_articles=args.max_articles,
+                     start_from=args.start_from)
+        logger.info("✅ Pipeline completed successfully")
 
     except KeyboardInterrupt:
-        logger.info("⚠️ Pipeline interrupted by user")
+        logger.warning("⚠️ Pipeline interrupted by user")
         sys.exit(1)
-    except Exception as e:
-        logger.error(f"❌ Pipeline failed: {e}")
-        import traceback
-
-        traceback.print_exc()
+    except Exception as ex:  # noqa: BLE001
+        logger.exception("❌ Pipeline failed: %s", ex)
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
