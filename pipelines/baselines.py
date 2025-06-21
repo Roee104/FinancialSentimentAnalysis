@@ -1,126 +1,112 @@
 # pipelines/baselines.py
 """
-Baseline models for comparison (VADER, etc.)
+Baseline models for comparison (VADER, etc.).
 """
+from __future__ import annotations
+
+# ───────────────────────────────  logging & config  ──────────────────────────
+import logging
+import nltk
+from pathlib import Path
+from typing import Dict, Optional
 
 import pandas as pd
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from typing import Dict, Optional
-import logging
-from config.settings import VADER_CONFIG
-from pipelines.base_pipeline import BasePipeline
+
+from config.settings import CACHE_DIR, VADER_CONFIG
 from core.ner import UnifiedNER
+from pipelines.base_pipeline import BasePipeline
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class VADERBaseline(BasePipeline):
-    """VADER baseline for sentiment analysis comparison"""
+    """VADER baseline for sentiment-analysis comparison."""
 
-    def __init__(self,
-                 vader_threshold: float = None,
-                 **kwargs):
-        """
-        Initialize VADER baseline
-
-        Args:
-            vader_threshold: Threshold for pos/neg classification
-            **kwargs: Base pipeline arguments
-        """
+    def __init__(self, vader_threshold: float | None = None, **kwargs):
         super().__init__(**kwargs)
         self.vader_threshold = vader_threshold or VADER_CONFIG["threshold"]
-        logger.info(f"VADER baseline with threshold: {self.vader_threshold}")
+        logger.info("VADER baseline threshold: %.3f", self.vader_threshold)
 
-    def initialize_components(self):
-        """Initialize VADER and other components"""
-        logger.info("Initializing VADER baseline components...")
+    # -------------------------------------------------------------------- init
+    def initialize_components(self) -> None:
+        logger.info("Initialising VADER baseline components …")
 
-        # Initialize VADER
-        logger.info("Loading VADER...")
+        # ---- VADER SENTIMENT -------------------------------------------------
+        lex_home = CACHE_DIR / "nltk"
+        nltk.data.path.append(str(lex_home))
+        try:
+            nltk.data.find("sentiment/vader_lexicon.zip")
+        except LookupError:
+            nltk.download("vader_lexicon", download_dir=str(
+                lex_home), quiet=True)
+
         self.vader = SentimentIntensityAnalyzer()
 
-        # Initialize NER (same as main pipeline)
-        logger.info("Loading Enhanced NER...")
+        # ---- NER same as main pipeline --------------------------------------
+        logger.info("Loading Enhanced NER …")
         self.ner = UnifiedNER(ticker_csv_path=self.ticker_csv)
 
-        # Text processor not needed for VADER
+        # Text-processor not needed
         self.text_processor = None
+        logger.info("VADER baseline ready.")
 
-        logger.info("VADER baseline initialized")
-
+    # -------------------------------------------------------------------- core
     def process_article(self, row: pd.Series) -> Optional[Dict]:
-        """Process article with VADER"""
         try:
-            # Extract basic info
-            date = row.get("date")
             title = str(row.get("title", ""))
             content = str(row.get("content", ""))
-
-            # Skip if empty
             if not title and not content:
                 return None
 
-            # Generate hash for deduplication
             article_hash = self._get_article_hash(title, content)
-
-            # Skip if already processed
             if self.resume and article_hash in self.processed_hashes:
-                self.stats['skipped'] += 1
+                self.stats["skipped"] += 1
                 return None
 
             full_text = f"{title}. {content}"
-
-            # Get VADER scores
             scores = self.vader.polarity_scores(full_text)
-
-            # Convert to label
             sentiment_label = self._vader_sentiment_to_label(
-                scores['compound'])
-            self.stats['sentiment_dist'][sentiment_label] += 1
+                scores["compound"])
+            self.stats["sentiment_dist"][sentiment_label] += 1
 
-            # Extract tickers (returns list of (ticker, confidence) tuples)
             article_dict = {
                 "title": title,
                 "content": content,
-                "symbols": self.ner.handle_symbols_array(row.get("symbols", []))
+                "symbols": self.ner.handle_symbols_array(row.get("symbols", [])),
             }
+            symbols = [sym for sym,
+                       _ in self.ner.extract_symbols(article_dict)]
 
-            symbol_confidence_pairs = self.ner.extract_symbols(article_dict)
-            # Extract just symbols
-            symbols = [sym for sym, _ in symbol_confidence_pairs]
-
-            # Update ticker stats
             if symbols:
-                self.stats['articles_with_tickers'] += 1
-                self.stats['total_tickers_found'] += len(symbols)
+                self.stats["articles_with_tickers"] += 1
+                self.stats["total_tickers_found"] += len(symbols)
             else:
-                self.stats['articles_without_tickers'] += 1
+                self.stats["articles_without_tickers"] += 1
 
-            # Build record
-            record = {
-                "date": date.isoformat() if hasattr(date, "isoformat") else str(date),
+            self.stats["processed"] += 1
+            return {
+                "date": str(row.get("date")),
                 "title": title[:500],
                 "article_hash": article_hash,
                 "overall_sentiment": sentiment_label,
                 "vader_scores": scores,
-                "compound_score": scores['compound'],
+                "compound_score": scores["compound"],
                 "tickers": symbols,
-                "ticker_count": len(symbols)
+                "ticker_count": len(symbols),
             }
 
-            self.stats['processed'] += 1
-            return record
-
-        except Exception as e:
-            logger.error(f"Error processing article: {str(e)[:100]}")
-            self.stats['errors'] += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Error processing article: %s", str(exc)[:100])
+            self.stats["errors"] += 1
             return None
 
-    def _vader_sentiment_to_label(self, compound_score: float) -> str:
-        """Convert VADER compound score to sentiment label"""
-        if compound_score >= self.vader_threshold:
+    # -------------------------------------------------------------------- util
+    def _vader_sentiment_to_label(self, compound: float) -> str:
+        if compound >= self.vader_threshold:
             return "Positive"
-        elif compound_score <= -self.vader_threshold:
+        if compound <= -self.vader_threshold:
             return "Negative"
-        else:
-            return "Neutral"
+        return "Neutral"
