@@ -5,7 +5,7 @@ Main pipeline implementation for financial sentiment analysis
 
 import logging
 from typing import Optional
-
+import functools
 from pipelines.base_pipeline import BasePipeline
 from core.sentiment import UnifiedSentimentAnalyzer
 from core.ner import UnifiedNER
@@ -156,4 +156,16 @@ def create_pipeline(pipeline_type: str = "optimized", agg_method: str = None, **
     if pipeline_type not in pipelines:
         raise ValueError(f"Unknown pipeline type: {pipeline_type}")
 
-    return pipelines[pipeline_type](**kwargs)
+    # kwargs.setdefault("aggregation_method", "conf_weighted")
+    # return pipelines[pipeline_type](**kwargs)
+
+    factory = pipelines[pipeline_type]
+
+   # If the factory is a functools.partial, it has a .keywords dict
+    # listing args already pre-set (e.g. aggregation_method).
+    if isinstance(factory, functools.partial):
+        for k in list(kwargs):            # iterate over *copy* of keys
+            if k in factory.keywords:     # drop duplicates
+                kwargs.pop(k)
+
+    return factory(**kwargs)

@@ -117,6 +117,8 @@ NER_CONFIG = {
 TEXT_PROCESSING = dict(
     min_clause_words=3,
     max_chunks=30,
+    max_content_length=10000,
+    min_length_for_commas=40,
 )
 
 PIPELINE_CONFIG = dict(
