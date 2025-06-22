@@ -193,7 +193,7 @@ class BasePipeline(ABC):
         """Flush output buffer to file"""
         if self._output_buffer and self._output_file:
             for line in self._output_buffer:
-                self._output_file.write(line + '\\n')
+                self._output_file.write(line + '\n')
             self._output_file.flush()
             self._output_buffer.clear()
 

@@ -130,68 +130,88 @@ Return ONLY the JSON object, no additional text."""
         output_cost = (self.cost_tracker['output_tokens'] / 1000) * 0.03
         return input_cost + output_cost
 
-    def select_articles_for_annotation(self,
-                                       input_file: Path,
-                                       n_samples: int = 300) -> pd.DataFrame:
-        """Smart sampling of articles for annotation"""
-        logger.info("Selecting articles for annotation...")
+    def select_articles_for_annotation(
+        self,
+        input_file: Path,
+        n_samples: int = 300,
+    ) -> pd.DataFrame:
+        """
+        Smart sampling of articles for annotation.
 
-        # Load processed articles
+        • “Complex”  = any article that mentions ≥ 1 ticker  
+        • “Two-ticker” and “Single-ticker” buckets are unchanged.  
+        • Bucket sizes are derived from n_samples (1⁄3 each, rounded down).  
+        • If a bucket has fewer rows than requested, we fill the short-fall
+          with a random sample from the remaining pool so that the returned
+          DataFrame contains *at most* n_samples rows.
+        """
+        logger.info("Selecting articles for annotation…")
+
+        # ----- load ----------------------------------------------------------------
         articles = []
-        with open(input_file, 'r', encoding='utf-8') as f:
-            for line in f:
+        with open(input_file, "r", encoding="utf-8") as f:
+            for ln in f:
                 try:
-                    articles.append(json.loads(line))
-                except:
+                    articles.append(json.loads(ln))
+                except json.JSONDecodeError:
                     continue
 
         df = pd.DataFrame(articles)
-        logger.info(f"Loaded {len(df)} articles")
+        logger.info("Loaded %d articles", len(df))
 
-        # Add ticker count
-        df['ticker_count'] = df['tickers'].apply(len)
+        # ----- features ------------------------------------------------------------
+        df["ticker_count"] = df["tickers"].apply(len)
 
-        # Smart sampling strategy
-        samples = []
+        bucket_target = max(1, n_samples // 3)        # per-bucket goal
+        samples: list[pd.DataFrame] = []
 
-        # 1. Complex articles (3+ tickers)
-        complex_articles = df[df['ticker_count'] >= 3]
-        if len(complex_articles) >= 100:
-            # Balance by sentiment
-            complex_sample = self._balanced_sample(complex_articles, 100)
-            samples.append(complex_sample)
-            logger.info(
-                f"Selected {len(complex_sample)} complex articles (3+ tickers)")
+        # 1️⃣  complex  (≥ 1 ticker) -------------------------------------------------
+        complex_df = df[df["ticker_count"] >= 1]
+        if len(complex_df) > 0:
+            sel = self._balanced_sample(complex_df, bucket_target)
+            samples.append(sel)
+            logger.info("Selected %d complex articles (≥ 1 ticker)", len(sel))
 
-        # 2. Mixed potential (2 tickers)
-        two_ticker = df[df['ticker_count'] == 2]
-        if len(two_ticker) >= 100:
-            two_ticker_sample = self._balanced_sample(two_ticker, 100)
-            samples.append(two_ticker_sample)
-            logger.info(
-                f"Selected {len(two_ticker_sample)} two-ticker articles")
+        # 2️⃣  two–ticker -----------------------------------------------------------
+        two_df = df[df["ticker_count"] == 2]
+        if len(two_df) > 0:
+            sel = self._balanced_sample(two_df, bucket_target)
+            samples.append(sel)
+            logger.info("Selected %d two-ticker articles", len(sel))
 
-        # 3. Single ticker (baseline)
-        single_ticker = df[df['ticker_count'] == 1]
-        if len(single_ticker) >= 100:
-            single_sample = self._balanced_sample(single_ticker, 100)
-            samples.append(single_sample)
-            logger.info(
-                f"Selected {len(single_sample)} single-ticker articles")
+        # 3️⃣  single-ticker --------------------------------------------------------
+        single_df = df[df["ticker_count"] == 1]
+        if len(single_df) > 0:
+            sel = self._balanced_sample(single_df, bucket_target)
+            samples.append(sel)
+            logger.info("Selected %d single-ticker articles", len(sel))
 
-        # Combine samples
+        # ---------------------------------------------------------------------------
         if samples:
-            selected = pd.concat(samples, ignore_index=True)
+            selected = pd.concat(samples, ignore_index=True).drop_duplicates(
+                subset="article_hash"
+            )
         else:
-            # Fallback: random sample
-            selected = df.sample(n=min(n_samples, len(df)))
+            selected = pd.DataFrame(columns=df.columns)
 
-        logger.info(f"Total articles selected: {len(selected)}")
-        logger.info(
-            f"Sentiment distribution: {selected['overall_sentiment'].value_counts().to_dict()}")
-        logger.info(
-            f"Ticker distribution: {selected['ticker_count'].value_counts().to_dict()}")
+        # Top-up with random rows (if any short-fall)
+        if len(selected) < n_samples:
+            remainder = df[~df["article_hash"].isin(selected["article_hash"])]
+            extra_needed = n_samples - len(selected)
+            if extra_needed > 0 and len(remainder) > 0:
+                extra = remainder.sample(n=min(extra_needed, len(remainder)))
+                selected = pd.concat([selected, extra], ignore_index=True)
 
+        # Final report --------------------------------------------------------------
+        logger.info("Total articles selected: %d", len(selected))
+        logger.info(
+            "Sentiment distribution: %s",
+            selected["overall_sentiment"].value_counts().to_dict(),
+        )
+        logger.info(
+            "Ticker distribution: %s",
+            selected["ticker_count"].value_counts().to_dict(),
+        )
         return selected
 
     def _balanced_sample(self, df: pd.DataFrame, n: int) -> pd.DataFrame:
@@ -231,35 +251,60 @@ Return ONLY the JSON object, no additional text."""
         return annotation
 
     def validate_annotations(self, annotations: List[Dict]) -> Dict:
-        """Validate annotation quality"""
-        validation_stats = {
-            'total': len(annotations),
-            'missing_overall': 0,
-            'missing_ticker_sentiments': 0,
-            'low_confidence': 0,
-            'ticker_mismatches': 0
+        """Validate annotation quality (robust to strange ticker formats)."""
+        stats = {
+            "total": len(annotations),
+            "missing_overall": 0,
+            "missing_ticker_sentiments": 0,
+            "low_confidence": 0,
+            "ticker_mismatches": 0,
         }
 
+        # ---------- helper --------------------------------------------------
+        def _normalise(seq) -> set[str]:
+            """
+            Return a *set of uppercase ticker strings* from:
+              • a list of strings          → ["AAPL", "msft"]
+              • a list of dicts            → [{"symbol": "MMP"}, ...]
+              • a dict-of-dicts (ticker_sentiments) → keys
+            Anything empty / None is ignored.
+            """
+            if isinstance(seq, dict):        # e.g. ticker_sentiments
+                seq = seq.keys()
+
+            out: set[str] = set()
+            for item in seq or []:
+                if isinstance(item, dict):
+                    sym = item.get("ticker") or item.get("symbol")
+                else:
+                    sym = item
+                if sym:
+                    out.add(str(sym).upper())
+            return out
+        # --------------------------------------------------------------------
+
         for ann in annotations:
-            # Check overall sentiment
-            if not ann.get('overall_sentiment'):
-                validation_stats['missing_overall'] += 1
+            # ---------- overall sentiment ----------
+            if not ann.get("overall_sentiment"):
+                stats["missing_overall"] += 1
 
-            # Check ticker sentiments
-            if not ann.get('ticker_sentiments'):
-                validation_stats['missing_ticker_sentiments'] += 1
+            # ---------- ticker-level sentiments ----------
+            ticker_sents = ann.get("ticker_sentiments", {})
+            if not ticker_sents:
+                stats["missing_ticker_sentiments"] += 1
 
-            # Check confidence
-            if ann.get('overall_confidence', 0) < 0.5:
-                validation_stats['low_confidence'] += 1
+            # ---------- confidence threshold ----------
+            if ann.get("overall_confidence", 0.0) < 0.50:
+                stats["low_confidence"] += 1
 
-            # Check if found tickers match annotated tickers
-            found = set(ann.get('found_tickers', []))
-            annotated = set(ann.get('ticker_sentiments', {}).keys())
+            # ---------- ticker consistency ----------
+            found = _normalise(ann.get("found_tickers", []))
+            annotated = _normalise(ticker_sents)
+
             if found and annotated and found != annotated:
-                validation_stats['ticker_mismatches'] += 1
+                stats["ticker_mismatches"] += 1
 
-        return validation_stats
+        return stats
 
     def run_consensus_annotation(self, article: Dict, n_runs: int = 3) -> Optional[Dict]:
         """Run multiple annotations and take consensus"""
