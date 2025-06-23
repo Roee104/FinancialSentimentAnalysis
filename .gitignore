@@ -34,6 +34,9 @@ data/evaluation_results.json
 data/gold_standard_*.jsonl
 data/ticker_sector.csv
 !data/.gitkeep
+data/vader_baseline_results.jsonl
+data/quality_filter_stats.csv
+data/financial_news_2020_2025_100k_metadata.json
 
 # ─────────────────────────  MODELS & WEIGHTS ────────────────────────
 models/

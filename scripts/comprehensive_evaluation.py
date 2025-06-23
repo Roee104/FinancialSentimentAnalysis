@@ -57,7 +57,8 @@ for name, file in pipelines.items():
                     # Ticker-level evaluation (if available)
                     if article_hash in gold_ticker_sentiments:
                         gold_tickers = gold_ticker_sentiments[article_hash]
-                        pred_tickers = {t['symbol']: t for t in pred.get('tickers', [])}
+                        pred_tickers = {t['symbol']
+                            : t for t in pred.get('tickers', [])}
 
                         for ticker, gold_info in gold_tickers.items():
                             if ticker in pred_tickers:
@@ -74,7 +75,8 @@ for name, file in pipelines.items():
         precision, recall, f1, support = precision_recall_fscore_support(
             y_true, y_pred, labels=['Positive', 'Neutral', 'Negative'], average='macro'
         )
-        cm = confusion_matrix(y_true, y_pred, labels=['Positive', 'Neutral', 'Negative'])
+        cm = confusion_matrix(y_true, y_pred, labels=[
+                              'Positive', 'Neutral', 'Negative'])
 
         print(f"\nOverall Sentiment Metrics:")
         print(f"  Accuracy: {accuracy:.3f} ({len(y_true)} samples)")
@@ -89,13 +91,18 @@ for name, file in pipelines.items():
 
         print(f"\nPer-Class Metrics:")
         for i, label in enumerate(['Positive', 'Neutral', 'Negative']):
-            print(f"  {label}: Precision={precision_c[i]:.3f}, Recall={recall_c[i]:.3f}, F1={f1_c[i]:.3f}")
+            print(
+                f"  {label}: Precision={precision_c[i]:.3f}, Recall={recall_c[i]:.3f}, F1={f1_c[i]:.3f}")
 
         if ticker_level_total > 0:
             ticker_accuracy = ticker_level_correct / ticker_level_total
-            print(f"\nTicker-Level Accuracy: {ticker_accuracy:.3f} ({ticker_level_total} ticker evaluations)")
+            print(
+                f"\nTicker-Level Accuracy: {ticker_accuracy:.3f} ({ticker_level_total} ticker evaluations)")
 
         # Store results
+         # -----------------------------------------------
+        # Store results *including* per-class statistics
+        # -----------------------------------------------
         results[name] = {
             'accuracy': accuracy,
             'macro_f1': f1,
@@ -103,7 +110,24 @@ for name, file in pipelines.items():
             'recall': recall,
             'confusion_matrix': cm.tolist(),
             'n_samples': len(y_true),
-            'ticker_accuracy': ticker_accuracy if ticker_level_total > 0 else None
+            'ticker_accuracy': ticker_accuracy if ticker_level_total > 0 else None,
+            'per_class': {
+                'Positive': {
+                    'precision': float(precision_c[0]),
+                    'recall':    float(recall_c[0]),
+                    'f1':        float(f1_c[0])
+                },
+                'Neutral':  {
+                    'precision': float(precision_c[1]),
+                    'recall':    float(recall_c[1]),
+                    'f1':        float(f1_c[1])
+                },
+                'Negative': {
+                    'precision': float(precision_c[2]),
+                    'recall':    float(recall_c[2]),
+                    'f1':        float(f1_c[2])
+                }
+            }
         }
 
 # Save results
@@ -119,4 +143,5 @@ print("="*60)
 print(f"{'Pipeline':<15} {'Accuracy':<10} {'Macro F1':<10} {'Samples':<10}")
 print("-"*45)
 for name, metrics in results.items():
-    print(f"{name:<15} {metrics['accuracy']:.3f}      {metrics['macro_f1']:.3f}      {metrics['n_samples']}")
+    print(
+        f"{name:<15} {metrics['accuracy']:.3f}      {metrics['macro_f1']:.3f}      {metrics['n_samples']}")

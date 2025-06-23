@@ -248,6 +248,7 @@ def create_gold_standard_evaluation_plots(results: Dict[str, Dict], output_dir: 
 
 def create_performance_comparison_plot(metrics_dict: Dict[str, Dict], output_dir: Path):
     """Create performance metrics comparison plot"""
+    output_dir.mkdir(parents=True, exist_ok=True)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
     # Sentiment accuracy plot
