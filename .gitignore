@@ -30,7 +30,6 @@ data/plots/*.png
 data/checkpoints/
 data/sector_cache.*
 data/article_length_stats.json
-data/evaluation_results.json
 data/gold_standard_*.jsonl
 data/ticker_sector.csv
 !data/.gitkeep
