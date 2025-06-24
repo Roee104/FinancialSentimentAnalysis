@@ -21,6 +21,21 @@ from config.settings import (
 
 logger = logging.getLogger(__name__)
 
+# --- Alias-table support --------------------------------------------
+ALIAS_CSV = Path(__file__).parents[1] / "data" / "ticker_alias_table.csv"
+try:
+    _ALIAS_DF = pd.read_csv(ALIAS_CSV, dtype=str)
+    # {"AAPL": {"apple", "apple inc", …}, …}
+    ALIAS_MAP = {
+        row.symbol.upper(): set(str(row.aliases).split("|"))
+        for _, row in _ALIAS_DF.iterrows()
+    }
+except FileNotFoundError:
+    logger.warning(
+        "Alias CSV %s missing – alias resolution disabled", ALIAS_CSV)
+    ALIAS_MAP = {}
+
+
 # Singleton cache for symbol dictionary
 _SYMBOL_CACHE = {}
 
@@ -159,6 +174,24 @@ class UnifiedNER:
                                    for ctx in FINANCIAL_CONTEXTS)
         return re.compile(f"\\b({context_pattern})\\b", re.IGNORECASE)
 
+    # ----------------------------------------------------------------- #
+    # Alias-based lookup
+    # ----------------------------------------------------------------- #
+    def _alias_hits(self, text: str) -> Dict[str, int]:
+        """Return raw hit-counts {symbol: n} for aliases found in text."""
+        hits = defaultdict(int)
+        lower = text.lower()
+        for sym, aliases in ALIAS_MAP.items():
+            for alias in aliases:
+                if alias in lower:
+                    hits[sym] += 1
+        return hits
+
+    def _finance_context(self, text: str, m: re.Match, window: int = 30) -> bool:
+        """True if a small window around match contains finance buzzwords."""
+        window_text = text[max(0, m.start()-window): m.end()+window].lower()
+        return any(w in window_text for w in ["stock", "shares", "nasdaq", "nyse", "$"])
+
     def clean_symbol(self, symbol: str) -> str:
         """Remove exchange suffixes from symbols"""
         symbol = symbol.upper().strip()
@@ -293,6 +326,15 @@ class UnifiedNER:
         for symbol in single_letter:
             results[symbol] = max(results.get(symbol, 0), 0.6)
 
+        # ----------------------------------------------------------------- #
+        # Alias resolution – low/medium confidence (0.5)
+        alias_counts = self._alias_hits(text)
+        total_alias_hits = sum(alias_counts.values()) or 1
+        for sym, cnt in alias_counts.items():
+            conf = 0.5 * cnt / total_alias_hits        # scale 0-0.5
+            results[sym] = max(results.get(sym, 0), conf)
+            self.extraction_stats["alias_mention"] += 1
+
         return list(results.items())
 
     def _extract_high_confidence_tickers(self, text: str) -> Set[str]:
@@ -405,30 +447,26 @@ class UnifiedNER:
         return company_mentions
 
     def _extract_single_letter_tickers(self, text: str) -> Set[str]:
-        """Extract single-letter tickers with strict validation"""
-        single_letter = set()
+        """Extract single-letter tickers with strict context validation."""
+        single_letter: Set[str] = set()
 
-        candidates = TICKER_PATTERN.findall(text)
+        # iterate with finditer so we have the Match object for context window
+        for m in TICKER_PATTERN.finditer(text):
+            candidate = m.group().upper()
+            if len(candidate) != 1 or not self._is_valid_symbol(candidate):
+                continue
 
-        for candidate in candidates:
-            candidate = candidate.upper()
-            if self._is_valid_symbol(candidate) and len(candidate) == 1:
-                clean_sym = self.clean_symbol(candidate)
+            clean_sym = self.clean_symbol(candidate)
 
-                # Must be in parentheses
-                if f"({candidate})" in text:
-                    single_letter.add(clean_sym)
-                    self.extraction_stats['single_letter_paren'] += 1
-                # Or in specific context
-                elif any(pattern in text.lower() for pattern in [
-                    f"{candidate.lower()} stock",
-                    f"{candidate.lower()} shares",
-                    f"${candidate}",
-                    f"buy {candidate.lower()}",
-                    f"sell {candidate.lower()}"
-                ]):
-                    single_letter.add(clean_sym)
-                    self.extraction_stats['single_letter_context'] += 1
+            # Case 1: explicit parenthetical e.g. "(C)"
+            if f"({candidate})" in text:
+                single_letter.add(clean_sym)
+                self.extraction_stats["single_letter_paren"] += 1
+
+            # Case 2: appears in a financial context window (shares, stock, $ etc.)
+            elif self._finance_context(text, m):
+                single_letter.add(clean_sym)
+                self.extraction_stats["single_letter_context"] += 1
 
         return single_letter
 

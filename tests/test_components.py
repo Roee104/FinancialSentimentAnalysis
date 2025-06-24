@@ -50,6 +50,21 @@ class TestNER:
         
         assert aapl_conf > msft_conf
 
+    def test_alias_resolution():
+        ner = UnifiedNER()
+        article = {"title": "Apple launches new MacBook", "content": ""}
+        res = ner.extract_symbols(article)
+        symbols = {s for s, _ in res}
+        assert "AAPL" in symbols
+
+    def test_single_letter_filter():
+        ner = UnifiedNER()
+        article_bad = {"title": "Plan C was discussed", "content": ""}
+        article_good = {"title": "C stock surges on NYSE", "content": ""}
+        assert "C" not in {s for s, _ in ner.extract_symbols(article_bad)}
+        assert "C" in  {s for s, _ in ner.extract_symbols(article_good)}
+
+
 
 class TestSentimentAnalyzer:
     """Test sentiment analysis"""
@@ -140,3 +155,4 @@ class TestTextProcessor:
         
         assert len(chunks) > 1
         assert all(len(chunk.split()) >= 3 for chunk in chunks)
+
