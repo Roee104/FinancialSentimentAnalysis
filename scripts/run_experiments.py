@@ -1,162 +1,186 @@
-# ────────────────────────────────────────────────────────────────────────────
-#  scripts/run_experiments.py
-#  Batch-runner that executes multiple pipeline flavours then plots results
-# ────────────────────────────────────────────────────────────────────────────
+"""scripts/run_experiments.py
+
+A *single‑purpose* runner that fine‑tunes a transformer for sentiment
+classification using **LoRA** (or full fine‑tune) and logs experiment metadata.
+It replaces the old "batch pipeline" script so that we can train FinBERT and
+DeBERTa‑Fin on the **3 000‑article gold standard** and save compact LoRA
+adapters under `models/lora/<model>/<timestamp>/`.
+
+Run examples
+------------
+```powershell
+python -m scripts.run_experiments --model finbert --lora --epochs 2 --lr 2e-5 \
+       --rank 8 --alpha 32 --gold data/3000_gold_standard.jsonl
+```
+
+Key behaviour
+-------------
+* Creates `experiments/<timestamp>_<model>_lora.json` with args + metrics.
+* Saves adapter to `models/lora/<model>/<timestamp>/`.
+* Prints the adapter path to **STDERR** so calling wrappers can capture it.
+"""
+
 from __future__ import annotations
-from scripts.run_pipeline import main as run_pipeline
-from analysis.visualization import create_comparison_plots
-from config.settings import DATA_DIR, OUTPUT_DIR
-from typing import List, Tuple
-from pathlib import Path
-from datetime import datetime
-import time
-import sys
+
+import argparse
 import json
-
-# -------------------------------------------------------  logging FIRST  ---
 import logging
-import logging.config
-from config.settings import LOGGING_CONFIG
-logging.config.dictConfig(LOGGING_CONFIG)
-logger = logging.getLogger(__name__)
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List
 
-# ----------------------------------------------------------  stdlib / 3rd-party
+import torch
+from datasets import load_dataset
+from peft import LoraConfig, get_peft_model
+from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
+                          Trainer, TrainingArguments)
 
-# ----------------------------------------------------------  internal imports
+# ------------------------------------------------  logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(message)s",
+    stream=sys.stdout,
+)
+LOG = logging.getLogger("run_experiments")
 
-# ────────────────────────────────────────────────────────────────────────────
+ROOT = Path(__file__).resolve().parents[1]
+MODELS_DIR = ROOT / "models" / "lora"
+EXPT_DIR = ROOT / "experiments"
+EXPT_DIR.mkdir(exist_ok=True, parents=True)
 
-
-def run_experiment(name: str, pipeline_args: list[str]) -> bool:
-    """Run a single experiment by forwarding `pipeline_args` to run_pipeline()."""
-    logger.info("\n%s\n🚀 %s\n%s", "=" * 60, name, "=" * 60)
-    start = time.time()
-
-    try:
-        original_argv = sys.argv
-        sys.argv = ["run_pipeline.py", *pipeline_args]
-        run_pipeline()
-        elapsed = time.time() - start
-        logger.info("✅ Completed in %.1f s", elapsed)
-        return True
-    except Exception as ex:   # noqa: BLE001
-        logger.exception("❌ Failed: %s", ex)
-        return False
-    finally:
-        sys.argv = original_argv
+# ----------------------------- helper ----------------------------------------
 
 
-def run_comparison(file_label_pairs: List[Tuple[Path, str]],
-                   output_dir: Path = OUTPUT_DIR) -> None:
-    """Transform raw JSONL → stats list → comparison plots."""
-    stats = []
+def timestamp() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
 
-    for fpath, label in file_label_pairs:
-        if not fpath.exists():
-            continue
 
-        pos = neu = neg = with_ticker = total = 0
-        with fpath.open(encoding="utf-8") as fh:
-            for line in fh:
-                rec = json.loads(line)
-                total += 1
-                sent = rec.get("overall_sentiment", "Neutral")
-                if sent == "Positive":
-                    pos += 1
-                elif sent == "Negative":
-                    neg += 1
-                else:
-                    neu += 1
-                if rec.get("tickers"):
-                    with_ticker += 1
+# ----------------------------- CLI ------------------------------------------
 
-        if total:
-            stats.append(
-                dict(
-                    name=label,
-                    sentiment_pct={
-                        "Positive": pos * 100 / total,
-                        "Neutral": neu * 100 / total,
-                        "Negative": neg * 100 / total,
-                    },
-                    ticker_coverage_pct=with_ticker * 100 / total,
-                )
-            )
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Fine‑tune a model with LoRA")
+    p.add_argument("--model", required=True,
+                   choices=["finbert", "deberta-fin"],
+                   help="Base model ID (shortcut names)")
+    p.add_argument("--lora", action="store_true",
+                   help="Enable LoRA fine‑tuning (recommended)")
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--lr", type=float, default=2e-5)
+    p.add_argument("--rank", type=int, default=8,
+                   help="LoRA rank (only if --lora)")
+    p.add_argument("--alpha", type=int, default=32,
+                   help="LoRA alpha (only if --lora)")
+    p.add_argument("--gold", type=Path, required=True,
+                   help="Path to gold‑standard JSONL")
+    return p.parse_args(argv)
 
-    if len(stats) >= 2:
-        create_comparison_plots(stats, output_dir)
-        logger.info("✅ Comparison plots saved to %s", output_dir)
+
+# ----------------------- dataset preparation ---------------------------------
+
+def load_gold_dataset(gold_path: Path):
+    """Return HF Dataset with `text` and `label` columns."""
+    raw = []
+    label2id = {"Positive": 0, "Neutral": 1, "Negative": 2}
+    with gold_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            obj = json.loads(line)
+            raw.append({
+                "text": obj["article_text"],  # assume field present
+                "label": label2id[obj["true_overall"]],
+            })
+    return load_dataset("json", data_files={"train": raw, "validation": raw[:200]})
+
+
+# ----------------------------- main logic ------------------------------------
+
+def main(argv: List[str] | None = None) -> None:
+    args = parse_args(argv)
+    LOG.info("🏷  Model: %s", args.model)
+    LOG.info("📜 Gold:  %s", args.gold)
+
+    # --- map shortcut → HF model id
+    HF_ID = {
+        "finbert": "ProsusAI/finbert",
+        "deberta-fin": "deepset/deberta-v3-base-finetuned-financial-sentiment",
+    }[args.model]
+
+    tokenizer = AutoTokenizer.from_pretrained(HF_ID)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        HF_ID, num_labels=3)
+
+    if args.lora:
+        lora_cfg = LoraConfig(r=args.rank, lora_alpha=args.alpha,
+                              target_modules=["query", "value"],
+                              lora_dropout=0.05, bias="none")
+        model = get_peft_model(model, lora_cfg)
+        LOG.info("🔧 Enabled LoRA ‑ rank=%d alpha=%d", args.rank, args.alpha)
+
+    # dataset
+    ds = load_gold_dataset(args.gold)
+
+    def tokenize(batch: Dict[str, str]):
+        return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=128)
+
+    ds = ds.map(tokenize, batched=True)
+    ds.set_format(type="torch", columns=[
+                  "input_ids", "attention_mask", "label"])
+
+    out_dir = MODELS_DIR / args.model / timestamp()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    training_args = TrainingArguments(
+        output_dir=out_dir,
+        num_train_epochs=args.epochs,
+        learning_rate=args.lr,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
+        evaluation_strategy="epoch",
+        logging_strategy="epoch",
+        save_strategy="no",
+        load_best_model_at_end=False,
+        fp16=torch.cuda.is_available(),
+        report_to=[],
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=ds["train"],
+        eval_dataset=ds["validation"],
+        tokenizer=tokenizer,
+    )
+
+    trainer.train()
+
+    # save adapter or full model
+    if args.lora:
+        model.save_pretrained(out_dir)
     else:
-        logger.warning("Not enough result files for comparison")
+        model.save_pretrained(out_dir / "full_model")
+    tokenizer.save_pretrained(out_dir)
 
-
-def main() -> None:
-    logger.info("🔬 RUNNING ALL EXPERIMENTS")
-    logger.info("Start: %s", datetime.now().isoformat(timespec="seconds"))
-
-    experiments = [
-        # Standard pipeline
-        dict(
-            name="Standard Pipeline",
-            args=["--pipeline", "standard",
-                  "--output", str(DATA_DIR / "processed_articles_standard.jsonl")],
-        ),
-        # Optimized (default conf_weighted)
-        dict(
-            name="Optimized Pipeline",
-            args=["--pipeline", "optimized",
-                  "--output", str(DATA_DIR / "processed_articles_optimized.jsonl")],
-        ),
-        # Optimized - threshold tweak
-        dict(
-            name="Optimized Pipeline (thr 0.15)",
-            args=["--pipeline", "optimized",
-                  "--output", str(DATA_DIR /
-                                  "processed_articles_optimized_t15.jsonl"),
-                  "--threshold", "0.15"],
-        ),
-        # Calibrated
-        dict(
-            name="Calibrated Pipeline",
-            args=["--pipeline", "calibrated",
-                  "--output", str(DATA_DIR / "processed_articles_calibrated.jsonl")],
-        ),
-        # VADER baseline
-        dict(
-            name="VADER Baseline",
-            args=["--pipeline", "vader",
-                  "--output", str(DATA_DIR / "vader_baseline_results.jsonl")],
-        ),
-        # Majority voting variant
-        dict(
-            name="Optimized Pipeline (Majority Method)",
-            args=["--pipeline", "optimized",
-                  "--output", str(DATA_DIR /
-                                  "processed_articles_majority.jsonl"),
-                  "--method", "majority"],
-        ),
-    ]
-
-    # Run each experiment
-    summary = [(exp["name"], run_experiment(exp["name"], exp["args"]))
-               for exp in experiments]
-
-    # Comparison plots
-    file_map = {
-        "Standard Pipeline": DATA_DIR / "processed_articles_standard.jsonl",
-        "VADER Baseline": DATA_DIR / "vader_baseline_results.jsonl",
-        "Optimized Pipeline": DATA_DIR / "processed_articles_optimized.jsonl",
-        "Optimized Pipeline (thr 0.15)": DATA_DIR / "processed_articles_optimized_t15.jsonl",
-        "Calibrated Pipeline": DATA_DIR / "processed_articles_calibrated.jsonl",
-        "Optimized Pipeline (Majority Method)": DATA_DIR / "processed_articles_majority.jsonl",
+    # ---------------------- metrics + metadata ------------------------------
+    metrics = trainer.evaluate()
+    meta = {
+        "timestamp": timestamp(),
+        "base_model": HF_ID,
+        "lora": bool(args.lora),
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "rank": args.rank if args.lora else None,
+        "alpha": args.alpha if args.lora else None,
+        "train_samples": len(ds["train"]),
+        "val_samples": len(ds["validation"]),
+        "metrics": metrics,
     }
-    available = [(f, name) for name, f in file_map.items() if f.exists()]
-    run_comparison(available, OUTPUT_DIR)
+    expt_path = EXPT_DIR / \
+        f"{timestamp()}_{args.model}_{'lora' if args.lora else 'full'}.json"
+    expt_path.write_text(json.dumps(meta, indent=2))
 
-    # Summary log
-    ok = sum(s for _, s in summary)
-    logger.info("Experiments finished: %d / %d succeeded", ok, len(summary))
+    print(f"[✓] Saved adapter to {out_dir}", file=sys.stderr)
+    LOG.info("Done. Adapter dir: %s", out_dir)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     main()

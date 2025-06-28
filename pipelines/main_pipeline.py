@@ -40,9 +40,14 @@ class FinancialSentimentPipeline(BasePipeline):
         super().__init__(**kwargs)
 
         self.sentiment_mode = sentiment_mode
-        self.aggregation_method = agg_method or aggregation_method
+         # map a single \"distance_weighted\" string to existing flags
+        if (agg_method or aggregation_method) == "distance_weighted":
+            self.aggregation_method = "conf_weighted"   # keep confidence base
+            self.use_distance_weighting = True
+        else:
+            self.aggregation_method = agg_method or aggregation_method
+            self.use_distance_weighting = use_distance_weighting
         self.aggregation_threshold = aggregation_threshold
-        self.use_distance_weighting = use_distance_weighting
 
         logger.info(f"Pipeline configured with:")
         logger.info(f"  Sentiment mode: {sentiment_mode}")
