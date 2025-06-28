@@ -30,7 +30,7 @@ TICKER_SECTOR_FILE = DATA_DIR / "ticker_sector.csv"
 SECTOR_CACHE_FILE = DATA_DIR / "sp500_sectors_cache.json"
 INPUT_PARQUET = DATA_DIR / "financial_news_2020_2025_100k.parquet"
 PROCESSED_OUTPUT = DATA_DIR / "processed_articles.jsonl"
-GOLD_FILE = DATA_DIR / "1500_gold_standard.jsonl"
+GOLD_FILE = DATA_DIR / "3000_gold_standard.jsonl"
 
 # ────────────────────────────────────────────────────────────────────────
 #  EXTERNAL SECRETS  (set in your environment or .env)
