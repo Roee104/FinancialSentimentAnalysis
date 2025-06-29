@@ -94,13 +94,13 @@ def load_gold_dataset(gold_path: Path):
 
     for article in train_articles:
         raw_train.append({
-            "text": article["article_text"],
+            "text": article["content"],  # Fixed: using 'content' field
             "label": label2id[article["true_overall"]],
         })
 
     for article in val_articles:
         raw_val.append({
-            "text": article["article_text"],
+            "text": article["content"],  # Fixed: using 'content' field
             "label": label2id[article["true_overall"]],
         })
 
@@ -120,9 +120,10 @@ def main(argv: List[str] | None = None) -> None:
     # --- map shortcut → HF model id
     HF_ID = {
         "finbert": "ProsusAI/finbert",
-        "deberta-fin": "deepset/deberta-v3-base-finetuned-fpbank",  # Fixed model ID
+        "deberta-fin": "FinanceInc/deberta-v3-base-financial-news-sentiment",  # Fixed model ID
     }[args.model]
 
+    LOG.info("Loading tokenizer and model: %s", HF_ID)
     tokenizer = AutoTokenizer.from_pretrained(HF_ID)
     model = AutoModelForSequenceClassification.from_pretrained(
         HF_ID, num_labels=3)
