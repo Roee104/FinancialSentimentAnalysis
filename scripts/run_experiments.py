@@ -84,8 +84,34 @@ def load_gold_dataset(gold_path: Path):
     raw_val = []
     label2id = {"Positive": 0, "Neutral": 1, "Negative": 2}
 
+    # Count labels for logging
+    label_counts = {"Positive": 0, "Neutral": 0,
+                    "Negative": 0, "Mixed": 0, "Other": 0}
+
     with gold_path.open(encoding="utf-8") as fh:
-        articles = [json.loads(line) for line in fh]
+        articles = []
+        for line in fh:
+            article = json.loads(line)
+            true_label = article.get("true_overall", "")
+
+            # Handle Mixed labels by mapping to Neutral
+            if true_label == "Mixed":
+                label_counts["Mixed"] += 1
+                article["true_overall"] = "Neutral"
+                true_label = "Neutral"
+
+            # Only include articles with valid labels
+            if true_label in label2id:
+                articles.append(article)
+                label_counts[true_label] += 1
+            else:
+                label_counts["Other"] += 1
+                LOG.warning(
+                    f"Skipping article with unknown label: {true_label}")
+
+    LOG.info(f"Label distribution: {label_counts}")
+    LOG.info(f"Mapped {label_counts['Mixed']} 'Mixed' labels to 'Neutral'")
+    LOG.info(f"Total valid articles: {len(articles)}")
 
     # Use 80/20 split for train/validation
     split_idx = int(len(articles) * 0.8)
@@ -94,13 +120,13 @@ def load_gold_dataset(gold_path: Path):
 
     for article in train_articles:
         raw_train.append({
-            "text": article["content"],  # Fixed: using 'content' field
+            "text": article["content"],
             "label": label2id[article["true_overall"]],
         })
 
     for article in val_articles:
         raw_val.append({
-            "text": article["content"],  # Fixed: using 'content' field
+            "text": article["content"],
             "label": label2id[article["true_overall"]],
         })
 
@@ -118,9 +144,11 @@ def main(argv: List[str] | None = None) -> None:
     LOG.info("📜 Gold:  %s", args.gold)
 
     # --- map shortcut → HF model id
+    # Using alternative DeBERTa models that actually exist
     HF_ID = {
         "finbert": "ProsusAI/finbert",
-        "deberta-fin": "FinanceInc/deberta-v3-base-financial-news-sentiment",  # Fixed model ID
+        # Alternative that exists
+        "deberta-fin": "mrm8488/deberta-v3-ft-financial-news-sentiment-analysis",
     }[args.model]
 
     LOG.info("Loading tokenizer and model: %s", HF_ID)
@@ -141,6 +169,8 @@ def main(argv: List[str] | None = None) -> None:
 
     # dataset
     ds = load_gold_dataset(args.gold)
+    LOG.info(
+        f"Train samples: {len(ds['train'])}, Val samples: {len(ds['validation'])}")
 
     def tokenize(batch: Dict[str, str]):
         return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=128)
