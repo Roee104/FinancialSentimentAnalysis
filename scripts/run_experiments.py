@@ -3,7 +3,7 @@
 A *single‑purpose* runner that fine‑tunes a transformer for sentiment
 classification using **LoRA** (or full fine‑tune) and logs experiment metadata.
 It replaces the old "batch pipeline" script so that we can train FinBERT and
-DeBERTa‑Fin on the **3 000‑article gold standard** and save compact LoRA
+DeBERTa‑Fin on the **3 000‑article gold standard** and save compact LoRA
 adapters under `models/lora/<model>/<timestamp>/`.
 
 Run examples
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import torch
-from datasets import load_dataset
+from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                           Trainer, TrainingArguments)
@@ -53,7 +53,7 @@ EXPT_DIR.mkdir(exist_ok=True, parents=True)
 
 
 def timestamp() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
+    return datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
 
 # ----------------------------- CLI ------------------------------------------
@@ -80,16 +80,34 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
 
 def load_gold_dataset(gold_path: Path):
     """Return HF Dataset with `text` and `label` columns."""
-    raw = []
+    raw_train = []
+    raw_val = []
     label2id = {"Positive": 0, "Neutral": 1, "Negative": 2}
+
     with gold_path.open(encoding="utf-8") as fh:
-        for line in fh:
-            obj = json.loads(line)
-            raw.append({
-                "text": obj["article_text"],  # assume field present
-                "label": label2id[obj["true_overall"]],
-            })
-    return load_dataset("json", data_files={"train": raw, "validation": raw[:200]})
+        articles = [json.loads(line) for line in fh]
+
+    # Use 80/20 split for train/validation
+    split_idx = int(len(articles) * 0.8)
+    train_articles = articles[:split_idx]
+    val_articles = articles[split_idx:]
+
+    for article in train_articles:
+        raw_train.append({
+            "text": article["article_text"],
+            "label": label2id[article["true_overall"]],
+        })
+
+    for article in val_articles:
+        raw_val.append({
+            "text": article["article_text"],
+            "label": label2id[article["true_overall"]],
+        })
+
+    return {
+        "train": Dataset.from_list(raw_train),
+        "validation": Dataset.from_list(raw_val)
+    }
 
 
 # ----------------------------- main logic ------------------------------------
@@ -102,7 +120,7 @@ def main(argv: List[str] | None = None) -> None:
     # --- map shortcut → HF model id
     HF_ID = {
         "finbert": "ProsusAI/finbert",
-        "deberta-fin": "deepset/deberta-v3-base-finetuned-financial-sentiment",
+        "deberta-fin": "deepset/deberta-v3-base-finetuned-fpbank",  # Fixed model ID
     }[args.model]
 
     tokenizer = AutoTokenizer.from_pretrained(HF_ID)
@@ -110,9 +128,13 @@ def main(argv: List[str] | None = None) -> None:
         HF_ID, num_labels=3)
 
     if args.lora:
-        lora_cfg = LoraConfig(r=args.rank, lora_alpha=args.alpha,
-                              target_modules=["query", "value"],
-                              lora_dropout=0.05, bias="none")
+        lora_cfg = LoraConfig(
+            r=args.rank,
+            lora_alpha=args.alpha,
+            target_modules=["query", "value"],
+            lora_dropout=0.05,
+            bias="none"
+        )
         model = get_peft_model(model, lora_cfg)
         LOG.info("🔧 Enabled LoRA ‑ rank=%d alpha=%d", args.rank, args.alpha)
 
@@ -122,15 +144,19 @@ def main(argv: List[str] | None = None) -> None:
     def tokenize(batch: Dict[str, str]):
         return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=128)
 
-    ds = ds.map(tokenize, batched=True)
-    ds.set_format(type="torch", columns=[
-                  "input_ids", "attention_mask", "label"])
+    ds["train"] = ds["train"].map(tokenize, batched=True)
+    ds["validation"] = ds["validation"].map(tokenize, batched=True)
+
+    ds["train"].set_format(type="torch", columns=[
+                           "input_ids", "attention_mask", "label"])
+    ds["validation"].set_format(type="torch", columns=[
+                                "input_ids", "attention_mask", "label"])
 
     out_dir = MODELS_DIR / args.model / timestamp()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     training_args = TrainingArguments(
-        output_dir=out_dir,
+        output_dir=str(out_dir),
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         per_device_train_batch_size=16,
