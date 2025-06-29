@@ -112,12 +112,16 @@ def run_aggregation_ablation(best_adapter_path):
 
 
 def main():
+    # Check if any adapters exist first
+    adapter_found = False
+
     # Task 4: Run both pipelines
     results = {}
 
     # Run FinBERT pipeline
     finbert_adapter = find_latest_adapter("finbert")
     if finbert_adapter:
+        adapter_found = True
         output_finbert = data_dir / "processed_articles_finetuned_finbert.jsonl"
         if run_pipeline_with_adapter("finbert", finbert_adapter, output_finbert):
             finbert_eval = run_evaluation("FinBERT fine-tuned")
@@ -125,11 +129,12 @@ def main():
                 results['finbert'] = {'adapter': str(
                     finbert_adapter), 'eval': finbert_eval}
     else:
-        print("❌ No FinBERT adapter found!")
+        print("\n❌ No FinBERT adapter found!")
 
     # Run DeBERTa pipeline
     deberta_adapter = find_latest_adapter("deberta-fin")
     if deberta_adapter:
+        adapter_found = True
         output_deberta = data_dir / "processed_articles_finetuned_deberta.jsonl"
         if run_pipeline_with_adapter("deberta-fin", deberta_adapter, output_deberta):
             deberta_eval = run_evaluation("DeBERTa fine-tuned")
@@ -137,7 +142,19 @@ def main():
                 results['deberta'] = {'adapter': str(
                     deberta_adapter), 'eval': deberta_eval}
     else:
-        print("❌ No DeBERTa adapter found!")
+        print("\n❌ No DeBERTa adapter found!")
+
+    # Exit if no adapters were found
+    if not adapter_found:
+        print("\n❌ ERROR: No adapters found! Please run the fine-tuning scripts first.")
+        print("   Run: python -m scripts.run_finbert_lora")
+        print("   Run: python -m scripts.run_deberta_lora")
+        sys.exit(1)
+
+    # Exit if no successful evaluations
+    if not results:
+        print("\n❌ ERROR: No successful pipeline runs or evaluations!")
+        sys.exit(1)
 
     # Task 6: Select best adapter
     print(f"\n{'='*60}")
@@ -152,12 +169,15 @@ def main():
         # Extract F1 score
         for line in data['eval'].split('\n'):
             if 'Ticker F1:' in line:
-                f1_score = float(line.split(':')[-1].strip())
-                print(f"{model}: Ticker F1 = {f1_score:.4f}")
-                if f1_score > best_f1:
-                    best_f1 = f1_score
-                    best_model = model
-                    best_adapter_path = data['adapter']
+                try:
+                    f1_score = float(line.split(':')[-1].strip())
+                    print(f"{model}: Ticker F1 = {f1_score:.4f}")
+                    if f1_score > best_f1:
+                        best_f1 = f1_score
+                        best_model = model
+                        best_adapter_path = data['adapter']
+                except ValueError:
+                    print(f"Warning: Could not parse F1 score from: {line}")
 
     if best_model:
         print(f"\n🏆 Best model: {best_model} with F1={best_f1:.4f}")
@@ -187,12 +207,33 @@ def main():
                 # Check if macro F1 improved
                 for line in ablation_eval.split('\n'):
                     if 'Macro F1:' in line:
-                        new_f1 = float(line.split(':')[-1].strip())
-                        print(f"\nDistance weighted Macro F1: {new_f1:.4f}")
-                        # Compare with baseline - would need to store original macro F1
+                        try:
+                            new_f1 = float(line.split(':')[-1].strip())
+                            print(
+                                f"\nDistance weighted Macro F1: {new_f1:.4f}")
+                        except ValueError:
+                            pass
+
+        # Save evaluation results for visualization
+        eval_results = {
+            'finbert': results.get('finbert', {}).get('eval', ''),
+            'deberta': results.get('deberta', {}).get('eval', ''),
+            'best_model': best_model,
+            'best_f1': best_f1
+        }
+
+        eval_file = root / "experiments" / "evaluation_results.json"
+        eval_file.parent.mkdir(exist_ok=True)
+        with open(eval_file, 'w') as f:
+            json.dump(eval_results, f, indent=2)
+
+        print(f"\n✅ Saved evaluation results to {eval_file}")
+    else:
+        print("\n❌ ERROR: Could not determine best model!")
+        sys.exit(1)
 
     print(f"\n{'='*60}")
-    print("All tasks completed!")
+    print("All tasks completed successfully!")
     print('='*60)
 
 
