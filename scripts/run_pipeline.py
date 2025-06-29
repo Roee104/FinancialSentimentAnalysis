@@ -58,10 +58,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    choices=["standard", "optimized", "calibrated"])
     p.add_argument("--sentiment-batch-size", type=int)
 
-    # Aggregation
+    # PEFT adapter support
+    p.add_argument("--adapter", type=str,
+                   help="Path to PEFT adapter directory")
+
+    # Aggregation - updated to support new methods
+    p.add_argument("--aggregation",
+                   choices=["default", "majority", "conf_weighted",
+                            "length_weighted", "distance_weighted", "confidence_weighted"],
+                   help="Aggregation method")
+
+    # Legacy support for --method/--agg-method
     p.add_argument("--method", "--agg-method",
                    dest="agg_method",
-                   choices=["default", "majority", "conf_weighted"])
+                   choices=["default", "majority", "conf_weighted"],
+                   help="(Deprecated) Use --aggregation instead")
+
     p.add_argument("--threshold", type=float)
     p.add_argument("--no-distance-weighting", action="store_true")
 
@@ -96,47 +108,59 @@ def main(argv: list[str] | None = None) -> None:
         cfg["pipeline_config"]["batch_size"] = args.batch_size
     if args.sentiment_batch_size:
         cfg["sentiment_config"]["batch_size"] = args.sentiment_batch_size
+    if args.max_articles:
+        cfg["pipeline_config"]["max_articles"] = args.max_articles
+    if args.start_from:
+        cfg["pipeline_config"]["start_from"] = args.start_from
+    if args.no_resume:
+        cfg["pipeline_config"]["resume"] = False
+    if args.sentiment_mode:
+        cfg["sentiment_config"]["mode"] = args.sentiment_mode
+    if args.threshold:
+        cfg["aggregation_config"]["aggregation_threshold"] = args.threshold
 
-    logger.info(
-        "🚀 Starting Financial Sentiment Analysis Pipeline — %s", args.pipeline)
-
-    try:
-        if args.pipeline == "vader":
-            pipeline = VADERBaseline(
-                input_path=cfg.get("input_parquet", INPUT_PARQUET),
-                output_path=cfg.get("processed_output", PROCESSED_OUTPUT),
-                batch_size=cfg["pipeline_config"]["batch_size"],
-                resume=not args.no_resume,
-                vader_threshold=args.vader_threshold,
-            )
+    # Handle aggregation method
+    aggregation_method = args.aggregation or args.agg_method
+    if aggregation_method:
+        # Map new method names to existing ones if needed
+        if aggregation_method in ["length_weighted", "confidence_weighted"]:
+            cfg["aggregation_config"]["aggregation_method"] = "conf_weighted"
+        elif aggregation_method == "distance_weighted":
+            cfg["aggregation_config"]["aggregation_method"] = "conf_weighted"
+            cfg["aggregation_config"]["use_distance_weighting"] = True
         else:
-            kwargs = dict(
-                input_path=cfg.get("input_parquet", INPUT_PARQUET),
-                output_path=cfg.get("processed_output", PROCESSED_OUTPUT),
-                batch_size=cfg["pipeline_config"]["batch_size"],
-                resume=not args.no_resume,
-                use_distance_weighting=not args.no_distance_weighting,
-            )
-            if args.sentiment_mode:
-                kwargs["sentiment_mode"] = args.sentiment_mode
-            if args.agg_method:
-                kwargs["aggregation_method"] = args.agg_method
-            if args.threshold is not None:
-                kwargs["aggregation_threshold"] = args.threshold
+            cfg["aggregation_config"]["aggregation_method"] = aggregation_method
 
-            pipeline = create_pipeline(args.pipeline, **kwargs)
+    if args.no_distance_weighting:
+        cfg["aggregation_config"]["use_distance_weighting"] = False
 
-        pipeline.run(max_articles=args.max_articles,
-                     start_from=args.start_from)
-        logger.info("✅ Pipeline completed successfully")
+    # Adapter support
+    if args.adapter:
+        cfg["sentiment_config"]["adapter_path"] = args.adapter
 
-    except KeyboardInterrupt:
-        logger.warning("⚠️ Pipeline interrupted by user")
+    # ---------------------------------------------------------- build pipeline
+    if args.pipeline == "vader":
+        logger.info("🏃 Running VADER baseline")
+        pipeline = VADERBaseline(threshold=args.vader_threshold, **cfg)
+    else:
+        logger.info(f"🏃 Running {args.pipeline} pipeline")
+        pipeline = create_pipeline(
+            mode=args.pipeline,
+            input_parquet=cfg.get("input_parquet", INPUT_PARQUET),
+            output_jsonl=cfg.get("processed_output", PROCESSED_OUTPUT),
+            **cfg
+        )
+
+    # ---------------------------------------------------------------- process
+    result = pipeline.process()
+
+    if result.success:
+        logger.info(f"✅ Success! Processed {result.total_processed} articles")
+        logger.info(f"📄 Output: {result.output_path}")
+    else:
+        logger.error(f"❌ Pipeline failed: {result.error}")
         sys.exit(1)
-    except Exception as ex:  # noqa: BLE001
-        logger.exception("❌ Pipeline failed: %s", ex)
-        sys.exit(1)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     main()

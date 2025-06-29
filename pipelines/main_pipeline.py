@@ -59,13 +59,20 @@ class FinancialSentimentPipeline(BasePipeline):
         """Initialize all pipeline components"""
         logger.info("Initializing pipeline components...")
 
-        # Initialize sentiment analyzer
+        # Initialize sentiment analyzer with adapter support
         logger.info(
             f"Loading sentiment analyzer ({self.sentiment_mode} mode)...")
+        
+        # Get adapter path from config if present
+        adapter_path = self.config.get("sentiment_config", {}).get("adapter_path")
+        if adapter_path:
+            logger.info(f"Using PEFT adapter: {adapter_path}")
+        
         self.sentiment_analyzer = UnifiedSentimentAnalyzer(
             mode=self.sentiment_mode,
             device=self.config.get("device"),
-            batch_size=self.config.get("sentiment_batch_size", 16)
+            batch_size=self.config.get("sentiment_batch_size", 16),
+            adapter_path=adapter_path
         )
 
         # Initialize NER
@@ -85,7 +92,6 @@ class FinancialSentimentPipeline(BasePipeline):
         )
 
         logger.info("All components initialized successfully")
-
 
 class OptimizedPipeline(FinancialSentimentPipeline):
     """Optimized pipeline with bias correction"""
