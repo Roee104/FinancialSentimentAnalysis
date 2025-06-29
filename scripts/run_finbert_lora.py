@@ -18,7 +18,25 @@ if not gold_file.exists():
     print(f"❌ Gold standard file not found: {gold_file}")
     sys.exit(1)
 
+# Quick check of file format
 print("✓ Gold standard file found")
+print("📋 Checking file format...")
+try:
+    import json
+    with open(gold_file, 'r') as f:
+        first_line = f.readline()
+        sample = json.loads(first_line)
+        if 'content' not in sample or 'true_overall' not in sample:
+            print(f"❌ ERROR: Gold standard missing required fields!")
+            print(f"   Found fields: {list(sample.keys())}")
+            print(f"   Required: 'content' and 'true_overall'")
+            sys.exit(1)
+        print(
+            f"✓ File format validated - {len(sample['content'])} chars in first article")
+except Exception as e:
+    print(f"❌ Error checking file format: {e}")
+    sys.exit(1)
+
 print("🚀 Starting FinBERT LoRA fine-tuning...")
 
 # Run the training command
