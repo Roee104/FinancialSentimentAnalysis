@@ -71,7 +71,7 @@ class FinancialSentimentPipeline(BasePipeline):
         self.sentiment_analyzer = UnifiedSentimentAnalyzer(
             mode=self.sentiment_mode,
             device=self.config.get("device"),
-            batch_size=self.config.get("sentiment_batch_size", 16),
+            batch_size=self.config.get("sentiment_config", {}).get("batch_size", 16),
             adapter_path=adapter_path
         )
 
