@@ -1,6 +1,5 @@
-# core/ner.py
 """
-Unified Enhanced NER for financial news with robust ticker extraction
+Improved NER for financial ticker extraction with better accuracy
 """
 
 import re
@@ -14,549 +13,338 @@ import functools
 import spacy
 from spacy.matcher import PhraseMatcher
 
-from config.settings import (
-    MASTER_TICKER_LIST, NER_CONFIG, EXCLUDED_WORDS,
-    FINANCIAL_CONTEXTS, DATA_DIR
-)
-
 logger = logging.getLogger(__name__)
 
-# --- Alias-table support --------------------------------------------
-ALIAS_CSV = Path(__file__).parents[1] / "data" / "ticker_alias_table.csv"
-try:
-    _ALIAS_DF = pd.read_csv(ALIAS_CSV, dtype=str)
-    # {"AAPL": {"apple", "apple inc", …}, …}
-    ALIAS_MAP = {
-        row.symbol.upper(): set(str(row.aliases).split("|"))
-        for _, row in _ALIAS_DF.iterrows()
-    }
-except FileNotFoundError:
-    logger.warning(
-        "Alias CSV %s missing – alias resolution disabled", ALIAS_CSV)
-    ALIAS_MAP = {}
+# Enhanced regex patterns for better ticker detection
+PATTERNS = {
+    # Parenthetical mentions with high confidence (e.g., "Apple (AAPL)")
+    'parenthetical': re.compile(r'\(([A-Z]{1,5}(?:\.[A-Z])?)\)', re.IGNORECASE),
+    
+    # Dollar sign mentions (e.g., "$AAPL")
+    'dollar_sign': re.compile(r'\$([A-Z]{1,5}(?:\.[A-Z])?)\b', re.IGNORECASE),
+    
+    # Exchange mentions (e.g., "AAPL on NYSE")
+    'exchange': re.compile(
+        r'\b([A-Z]{1,5}(?:\.[A-Z])?)\s+(?:on|at|traded\s+on|listed\s+on)\s+'
+        r'(?:the\s+)?(?:NYSE|NASDAQ|AMEX|OTC|exchange)', 
+        re.IGNORECASE
+    ),
+    
+    # Stock/shares mentions (e.g., "MSFT stock", "AAPL shares")
+    'stock_mention': re.compile(
+        r'\b([A-Z]{1,5}(?:\.[A-Z])?)\s+'
+        r'(?:stock|shares?|equity|equities|securities|ticker|symbol)', 
+        re.IGNORECASE
+    ),
+    
+    # Financial actions (e.g., "buy AAPL", "upgraded MSFT")
+    'action': re.compile(
+        r'(?:buy|sell|hold|upgrade[d]?|downgrade[d]?|rate[d]?|target|'
+        r'initiate[d]?|reiterate[d]?|maintain[s]?|cut|raise[d]?)\s+'
+        r'(?:on\s+)?([A-Z]{1,5}(?:\.[A-Z])?)\b', 
+        re.IGNORECASE
+    ),
+    
+    # Analyst mentions (e.g., "AAPL PT", "MSFT price target")
+    'analyst': re.compile(
+        r'\b([A-Z]{1,5}(?:\.[A-Z])?)\s+'
+        r'(?:PT|price\s+target|target\s+price|rating)', 
+        re.IGNORECASE
+    ),
+    
+    # Trading mentions (e.g., "AAPL trading at", "MSFT closed")
+    'trading': re.compile(
+        r'\b([A-Z]{1,5}(?:\.[A-Z])?)\s+'
+        r'(?:trading|traded|trade[s]?|close[d]?|open[ed]?|gain[ed]?|'
+        r'fell|rose|jump[ed]?|surg[ed]?|tumbl[ed]?|plunge[d]?)\s+'
+        r'(?:at|to|by|up|down)?', 
+        re.IGNORECASE
+    ),
+    
+    # Possessive mentions (e.g., "Apple's earnings", "Microsoft's CEO")
+    'possessive': re.compile(
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'s\s+"
+        r"(?:earnings?|revenue|sales|CEO|CFO|stock|shares?)", 
+        re.IGNORECASE
+    ),
+}
 
+# Financial context words for validation
+FINANCIAL_CONTEXTS = {
+    'price', 'stock', 'share', 'shares', 'equity', 'market', 'trading',
+    'earnings', 'revenue', 'profit', 'loss', 'gain', 'analyst', 'upgrade',
+    'downgrade', 'buy', 'sell', 'hold', 'target', 'dividend', 'yield',
+    'portfolio', 'investment', 'investor', 'traded', 'exchange', 'nasdaq',
+    'nyse', 'ticker', 'symbol', 'ipo', 'offering', 'valuation', 'pe',
+    'ratio', 'eps', 'guidance', 'forecast', 'quarter', 'fiscal', 'beat',
+    'miss', 'consensus', 'estimate', 'analyst', 'rating', 'outperform',
+    'underperform', 'neutral', 'bullish', 'bearish', 'long', 'short'
+}
 
-# Singleton cache for symbol dictionary
-_SYMBOL_CACHE = {}
+# Common names that should NOT be tickers
+EXCLUDED_NAMES = {
+    'COOK', 'TIM', 'ELON', 'JEFF', 'WARREN', 'BILL', 'STEVE', 'MARK',
+    'PETER', 'PAUL', 'MARY', 'JOHN', 'JAMES', 'ROBERT', 'MICHAEL',
+    'DAVID', 'RICHARD', 'CHARLES', 'JOSEPH', 'THOMAS', 'DANIEL',
+    'CEO', 'CFO', 'CTO', 'COO', 'IPO', 'SEC', 'FDA', 'EPA', 'DOJ',
+    'FBI', 'CIA', 'NSA', 'IRS', 'FTC', 'FCC', 'DOT', 'HHS', 'DHS',
+    'AI', 'ML', 'API', 'IT', 'HR', 'PR', 'IR', 'VC', 'PE', 'LP'
+}
 
-# Updated regex patterns for ticker detection
-# Matches single-letter and multi-letter tickers
-TICKER_PATTERN = re.compile(r"\b[A-Z]{1,5}\b", re.IGNORECASE)
-MULTI_WORD_TICKER_PATTERN = re.compile(
-    r"\b[A-Z]{1,5}(?:\.[A-Z])?\b", re.IGNORECASE)  # Handles BRK.B
-PARENTHETICAL_PATTERN = re.compile(
-    r"\(([A-Z]{1,5}(?:\.[A-Z])?)\)", re.IGNORECASE)
-EXCHANGE_PATTERN = re.compile(
-    r"\b([A-Z]{2,5}(?:\.[A-Z])?)\s+(?:on|traded\s+on|listed\s+on)\s+(?:NYSE|NASDAQ|the\s+exchange)",
-    re.IGNORECASE
-)
-STOCK_MENTION_PATTERN = re.compile(
-    r"\b([A-Z]{2,5}(?:\.[A-Z])?)\s+(?:stock|shares|equity|securities)",
-    re.IGNORECASE
-)
-PRICE_PATTERN = re.compile(r"\$([A-Z]{2,5}(?:\.[A-Z])?)\b")
-FINANCIAL_ACTION_PATTERN = re.compile(
-    r"(?:buy|sell|hold|upgrade|downgrade|target|rating)\s+([A-Z]{2,5}(?:\.[A-Z])?)\b",
-    re.IGNORECASE
-)
-
-
-class UnifiedNER:
+class ImprovedNER:
     """
-    Unified Named Entity Recognition for financial tickers
-    Combines enhanced extraction with numpy array handling
+    Improved NER for financial ticker extraction with better pattern matching
+    and context validation
     """
-
-    def __init__(self, ticker_csv_path: str = None):
-        """
-        Initialize NER with ticker dictionary
-
-        Args:
-            ticker_csv_path: Path to master ticker list CSV
-        """
-        self.ticker_csv_path = Path(ticker_csv_path or MASTER_TICKER_LIST)
-
-        # Use cached symbol dict if available
-        cache_key = str(self.ticker_csv_path)
-        if cache_key in _SYMBOL_CACHE:
-            self.symbol_dict = _SYMBOL_CACHE[cache_key]
-            logger.debug(
-                f"Using cached symbol dictionary ({len(self.symbol_dict)} symbols)")
-        else:
-            self.symbol_dict = self._load_symbol_list()
-            _SYMBOL_CACHE[cache_key] = self.symbol_dict
-
-        self.company_to_symbol = self._build_company_lookup()
-        self.financial_context_pattern = self._build_context_pattern()
-
-        # Initialize spaCy components
-        self._init_spacy()
-
-        # Configuration
-        self.config = NER_CONFIG.copy()
-
-        # Statistics tracking
+    
+    def __init__(self, ticker_csv_path: str = None, debug: bool = False):
+        """Initialize improved NER"""
+        self.debug = debug
         self.extraction_stats = defaultdict(int)
-
-        logger.info(f"Initialized NER with {len(self.symbol_dict)} symbols")
-
-    def _init_spacy(self):
-        """Initialize spaCy NLP and PhraseMatcher"""
-        try:
-            self.nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
-            self.phrase_matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
-
-            # Add company names to phrase matcher
-            company_patterns = []
-            # Limit for performance
-            for company_name in list(self.company_to_symbol.keys())[:1000]:
-                doc = self.nlp(company_name)
-                company_patterns.append(doc)
-
-            if company_patterns:
-                self.phrase_matcher.add("COMPANY_NAMES", company_patterns)
-
-            logger.debug("Initialized spaCy components")
-        except Exception as e:
-            logger.warning(f"Failed to initialize spaCy: {e}")
-            self.nlp = None
-            self.phrase_matcher = None
-
-    def _load_symbol_list(self) -> Dict[str, str]:
-        """Load symbol->company mapping"""
-        try:
-            df = pd.read_csv(self.ticker_csv_path, dtype=str)
-            df["symbol"] = df["symbol"].str.upper().str.strip()
-            df["company_name"] = df["company_name"].str.lower().str.strip()
-            symbol_dict = dict(zip(df["symbol"], df["company_name"]))
-            logger.info(
-                f"Loaded {len(symbol_dict)} symbols from {self.ticker_csv_path}")
-            return symbol_dict
-        except FileNotFoundError:
-            logger.warning(f"Ticker list not found at {self.ticker_csv_path}")
-            return {}
-        except Exception as e:
-            logger.error(f"Error loading symbol list: {e}")
-            return {}
-
-    def _build_company_lookup(self) -> Dict[str, str]:
-        """Build company_name->symbol lookup with better matching"""
-        lookup = {}
-        for symbol, company in self.symbol_dict.items():
-            company_words = company.split()
-
-            # Full company name
-            lookup[company] = symbol
-
-            # Company name without common suffixes
-            cleaned_company = re.sub(
-                r'\b(inc|corp|corporation|ltd|limited|plc|co|company)\b\.?', '', company, flags=re.IGNORECASE).strip()
-            if cleaned_company and cleaned_company != company:
-                lookup[cleaned_company] = symbol
-
-            # First 2-3 significant words
-            if len(company_words) >= 2:
-                short_name = " ".join(company_words[:2])
-                if len(short_name) > 5:  # Avoid too short names
-                    lookup[short_name] = symbol
-
-                if len(company_words) >= 3:
-                    medium_name = " ".join(company_words[:3])
-                    if len(medium_name) > 8:
-                        lookup[medium_name] = symbol
-
-        logger.info(f"Built company lookup with {len(lookup)} entries")
-        return lookup
-
-    def _build_context_pattern(self) -> re.Pattern:
-        """Build regex pattern for financial contexts"""
-        context_pattern = "|".join(re.escape(ctx)
-                                   for ctx in FINANCIAL_CONTEXTS)
-        return re.compile(f"\\b({context_pattern})\\b", re.IGNORECASE)
-
-    # ----------------------------------------------------------------- #
-    # Alias-based lookup
-    # ----------------------------------------------------------------- #
-    def _alias_hits(self, text: str) -> Dict[str, int]:
-        """Return raw hit-counts {symbol: n} for aliases found in text."""
-        hits = defaultdict(int)
-        lower = text.lower()
-        for sym, aliases in ALIAS_MAP.items():
-            for alias in aliases:
-                if alias in lower:
-                    hits[sym] += 1
-        return hits
-
-    def _finance_context(self, text: str, m: re.Match, window: int = 30) -> bool:
-        """True if a small window around match contains finance buzzwords."""
-        window_text = text[max(0, m.start()-window): m.end()+window].lower()
-        return any(w in window_text for w in ["stock", "shares", "nasdaq", "nyse", "$"])
-
-    def clean_symbol(self, symbol: str) -> str:
-        """Remove exchange suffixes from symbols"""
-        symbol = symbol.upper().strip()
-        for suffix in self.config["exchange_suffixes"]:
-            if symbol.endswith(suffix):
-                return symbol[:-len(suffix)]
-        return symbol
-
-    def normalize_symbols_list(self, symbols_list: List[str]) -> List[str]:
-        """Clean and normalize a list of symbols"""
-        normalized = []
-        seen = set()
-        for symbol in symbols_list:
-            clean_sym = self.clean_symbol(symbol)
-            if clean_sym and clean_sym not in seen:
-                normalized.append(clean_sym)
-                seen.add(clean_sym)
-        return normalized
-
-    def handle_symbols_array(self, symbols_raw: Union[None, str, list, np.ndarray]) -> List[str]:
-        """
-        Convert various symbol formats to list, handling numpy arrays properly
-
-        Args:
-            symbols_raw: Raw symbols in various formats
-
-        Returns:
-            List of symbol strings
-        """
-        if symbols_raw is None:
-            return []
-        elif isinstance(symbols_raw, np.ndarray):
-            return symbols_raw.tolist()
-        elif isinstance(symbols_raw, list):
-            return symbols_raw
-        elif isinstance(symbols_raw, str):
-            if symbols_raw.startswith('[') and symbols_raw.endswith(']'):
-                try:
-                    return eval(symbols_raw)
-                except:
-                    return []
-            return [symbols_raw] if symbols_raw else []
-        elif pd.isna(symbols_raw):
-            return []
-        else:
+        
+        # Load valid tickers
+        self.valid_tickers = self._load_valid_tickers(ticker_csv_path)
+        self.company_to_ticker = self._build_company_mappings()
+        
+        # Initialize spaCy for advanced NLP
+        self._init_spacy()
+        
+        logger.info(f"Initialized ImprovedNER with {len(self.valid_tickers)} valid tickers")
+    
+    def _load_valid_tickers(self, ticker_csv_path: str = None) -> Set[str]:
+        """Load valid ticker symbols from CSV"""
+        valid_tickers = set()
+        
+        if ticker_csv_path and Path(ticker_csv_path).exists():
             try:
-                return list(symbols_raw)
-            except:
-                return []
-
-    def extract_symbols(self,
-                        article: Dict,
-                        min_confidence: float = None,
-                        use_metadata: bool = None) -> List[Tuple[str, float]]:
-        """
-        Main extraction method for symbols from article
-
-        Args:
-            article: Article dict with title, content, symbols
-            min_confidence: Minimum confidence threshold
-            use_metadata: Whether to include metadata symbols
-
-        Returns:
-            List of (symbol, confidence) tuples
-        """
-        min_confidence = min_confidence or self.config["min_confidence"]
-        use_metadata = use_metadata if use_metadata is not None else self.config[
-            "use_metadata"]
-
-        all_symbols = {}  # symbol -> max confidence
-
-        # Handle metadata symbols
-        if use_metadata:
-            metadata_symbols = self.handle_symbols_array(
-                article.get("symbols", []))
-            if metadata_symbols:
-                clean_metadata = self.normalize_symbols_list(metadata_symbols)
-                for sym in clean_metadata:
-                    # High confidence for metadata
-                    all_symbols[sym] = max(all_symbols.get(sym, 0), 0.95)
-                self.extraction_stats['metadata'] += len(clean_metadata)
-
-        # Extract from text
-        title = article.get("title", "")
-        content = article.get("content", "")
-        full_text = f"{title}\n\n{content}"
-
-        if full_text.strip():
-            text_symbols = self.extract_symbols_with_confidence(full_text)
-
-            # Update with higher confidence
-            for symbol, confidence in text_symbols:
-                if confidence >= min_confidence:
-                    all_symbols[symbol] = max(
-                        all_symbols.get(symbol, 0), confidence)
-
-        # Return as sorted list of tuples
-        return sorted([(sym, conf) for sym, conf in all_symbols.items()],
-                      key=lambda x: x[1], reverse=True)
-
-    def extract_symbols_with_confidence(self, text: str) -> List[Tuple[str, float]]:
-        """
-        Extract symbols with confidence scores
-
-        Returns:
-            List of (symbol, confidence) tuples
-        """
-        if not text or not isinstance(text, str):
-            return []
-
-        results = {}  # symbol -> max confidence
-
-        # Extract different categories
-        high_conf = self._extract_high_confidence_tickers(text)
-        medium_conf = self._extract_medium_confidence_tickers(text)
-        company_mentions = self._extract_company_mentions(text)
-        single_letter = self._extract_single_letter_tickers(text)
-
-        # High confidence (0.9)
-        for symbol in high_conf:
-            results[symbol] = max(results.get(symbol, 0), 0.9)
-
-        # Medium confidence (0.7)
-        for symbol in medium_conf:
-            results[symbol] = max(results.get(symbol, 0), 0.7)
-
-        # Company mentions (0.8)
-        for symbol in company_mentions:
-            results[symbol] = max(results.get(symbol, 0), 0.8)
-
-        # Single letter (0.6)
-        for symbol in single_letter:
-            results[symbol] = max(results.get(symbol, 0), 0.6)
-
-        # ----------------------------------------------------------------- #
-        # Alias resolution – low/medium confidence (0.5)
-        alias_counts = self._alias_hits(text)
-        total_alias_hits = sum(alias_counts.values()) or 1
-        for sym, cnt in alias_counts.items():
-            conf = 0.5 * cnt / total_alias_hits        # scale 0-0.5
-            results[sym] = max(results.get(sym, 0), conf)
-            self.extraction_stats["alias_mention"] += 1
-
-        return list(results.items())
-
-    def _extract_high_confidence_tickers(self, text: str) -> Set[str]:
-        """Extract tickers with high confidence signals"""
-        high_conf = set()
-
-        # Parenthetical mentions
-        for match in PARENTHETICAL_PATTERN.finditer(text):
-            symbol = match.group(1).upper()
-            if self._is_valid_symbol(symbol):
-                clean_sym = self.clean_symbol(symbol)
-                high_conf.add(clean_sym)
-                self.extraction_stats['parenthetical'] += 1
-
-        # Exchange mentions
-        for match in EXCHANGE_PATTERN.finditer(text):
-            symbol = match.group(1).upper()
-            if self._is_valid_symbol(symbol):
-                clean_sym = self.clean_symbol(symbol)
-                high_conf.add(clean_sym)
-                self.extraction_stats['exchange_mention'] += 1
-
-        # Stock/shares mentions
-        for match in STOCK_MENTION_PATTERN.finditer(text):
-            symbol = match.group(1).upper()
-            if self._is_valid_symbol(symbol):
-                clean_sym = self.clean_symbol(symbol)
-                high_conf.add(clean_sym)
-                self.extraction_stats['stock_mention'] += 1
-
-        # Price mentions
-        for match in PRICE_PATTERN.finditer(text):
-            symbol = match.group(1).upper()
-            if self._is_valid_symbol(symbol):
-                clean_sym = self.clean_symbol(symbol)
-                high_conf.add(clean_sym)
-                self.extraction_stats['price_mention'] += 1
-
-        # Financial actions
-        for match in FINANCIAL_ACTION_PATTERN.finditer(text):
-            symbol = match.group(1).upper()
-            if self._is_valid_symbol(symbol):
-                clean_sym = self.clean_symbol(symbol)
-                high_conf.add(clean_sym)
-                self.extraction_stats['action_mention'] += 1
-
-        return high_conf
-
-    def _extract_medium_confidence_tickers(self, text: str) -> Set[str]:
-        """Extract tickers with medium confidence"""
-        medium_conf = set()
-
-        # Use multi-word pattern for better coverage
-        candidates = MULTI_WORD_TICKER_PATTERN.findall(text)
-
-        for candidate in candidates:
-            candidate = candidate.upper()
-            if self._is_valid_symbol(candidate):
-                clean_sym = self.clean_symbol(candidate)
-
-                # Check financial context
-                context_window = self._extract_context_window(text, candidate)
-                if self._has_financial_context(context_window):
-                    medium_conf.add(clean_sym)
-                    self.extraction_stats['context_based'] += 1
-                elif len(clean_sym) >= 3:  # Longer tickers without explicit context
-                    medium_conf.add(clean_sym)
-                    self.extraction_stats['multi_letter'] += 1
-
-        return medium_conf
-
-    def _extract_company_mentions(self, text: str) -> Set[str]:
-        """Extract symbols based on company names using spaCy PhraseMatcher"""
-        company_mentions = set()
-
-        if self.phrase_matcher and self.nlp:
-            try:
-                doc = self.nlp(text.lower())
-                matches = self.phrase_matcher(doc)
-
-                for match_id, start, end in matches:
-                    span = doc[start:end]
-                    company_text = span.text
-
-                    if company_text in self.company_to_symbol:
-                        symbol = self.company_to_symbol[company_text]
-                        company_mentions.add(symbol)
-                        self.extraction_stats['company_mention_spacy'] += 1
-
+                df = pd.read_csv(ticker_csv_path)
+                if 'symbol' in df.columns:
+                    valid_tickers = set(df['symbol'].str.upper().dropna())
+                elif 'Symbol' in df.columns:
+                    valid_tickers = set(df['Symbol'].str.upper().dropna())
+                logger.info(f"Loaded {len(valid_tickers)} tickers from {ticker_csv_path}")
             except Exception as e:
-                logger.debug(f"SpaCy matching error: {e}")
-
-        # Fallback to simple matching
-        text_lower = text.lower()
-
-        # Sort by length to avoid partial matches
-        sorted_companies = sorted(
-            self.company_to_symbol.items(),
-            key=lambda x: len(x[0]),
-            reverse=True
-        )[:500]  # Limit for performance
-
-        for company_name, symbol in sorted_companies:
-            # Use word boundaries for better matching
-            pattern = r'\b' + re.escape(company_name) + r'\b'
-            if re.search(pattern, text_lower):
-                company_mentions.add(symbol)
-                self.extraction_stats['company_mention'] += 1
-
-        return company_mentions
-
-    def _extract_single_letter_tickers(self, text: str) -> Set[str]:
-        """Extract single-letter tickers with strict context validation."""
-        single_letter: Set[str] = set()
-
-        # iterate with finditer so we have the Match object for context window
-        for m in TICKER_PATTERN.finditer(text):
-            candidate = m.group().upper()
-            if len(candidate) != 1 or not self._is_valid_symbol(candidate):
-                continue
-
-            clean_sym = self.clean_symbol(candidate)
-
-            # Case 1: explicit parenthetical e.g. "(C)"
-            if f"({candidate})" in text:
-                single_letter.add(clean_sym)
-                self.extraction_stats["single_letter_paren"] += 1
-
-            # Case 2: appears in a financial context window (shares, stock, $ etc.)
-            elif self._finance_context(text, m):
-                single_letter.add(clean_sym)
-                self.extraction_stats["single_letter_context"] += 1
-
-        return single_letter
-
-    def _is_valid_symbol(self, symbol: str) -> bool:
-        """Check if symbol is valid"""
-        clean_sym = self.clean_symbol(symbol)
-        return clean_sym in self.symbol_dict and clean_sym not in EXCLUDED_WORDS
-
-    def _has_financial_context(self, text: str) -> bool:
-        """Check if text contains financial context"""
-        return bool(self.financial_context_pattern.search(text))
-
-    def _extract_context_window(self, text: str, ticker: str, window_size: int = 100) -> str:
-        """Extract context window around ticker"""
-        ticker_pos = text.upper().find(ticker.upper())
-        if ticker_pos == -1:
-            return ""
-
-        start = max(0, ticker_pos - window_size)
-        end = min(len(text), ticker_pos + len(ticker) + window_size)
-        return text[start:end]
-
-    def get_extraction_stats(self) -> Dict[str, int]:
-        """Get extraction statistics"""
-        return dict(self.extraction_stats)
-
-    def reset_stats(self):
-        """Reset extraction statistics"""
-        self.extraction_stats.clear()
-
-    # Unit tests
-    def test_ticker_extraction(self):
-        """Test ticker extraction functionality"""
+                logger.error(f"Error loading ticker CSV: {e}")
+        
+        # Add some common tickers if none loaded
+        if not valid_tickers:
+            valid_tickers = {
+                'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA',
+                'JPM', 'V', 'JNJ', 'WMT', 'PG', 'MA', 'HD', 'DIS', 'BAC',
+                'ADBE', 'NFLX', 'CRM', 'PFE', 'CSCO', 'INTC', 'ORCL',
+                'BRK.A', 'BRK.B', 'C', 'F', 'T', 'X'  # Include single letters
+            }
+        
+        return valid_tickers
+    
+    def _build_company_mappings(self) -> Dict[str, str]:
+        """Build company name to ticker mappings"""
+        # Common company mappings
+        mappings = {
+            'apple': 'AAPL',
+            'apple inc': 'AAPL',
+            'apple incorporated': 'AAPL',
+            'microsoft': 'MSFT',
+            'microsoft corp': 'MSFT',
+            'microsoft corporation': 'MSFT',
+            'amazon': 'AMZN',
+            'amazon.com': 'AMZN',
+            'google': 'GOOGL',
+            'alphabet': 'GOOGL',
+            'meta': 'META',
+            'meta platforms': 'META',
+            'facebook': 'META',
+            'tesla': 'TSLA',
+            'tesla motors': 'TSLA',
+            'nvidia': 'NVDA',
+            'berkshire': 'BRK.B',
+            'berkshire hathaway': 'BRK.B',
+            'jp morgan': 'JPM',
+            'jpmorgan': 'JPM',
+            'jpmorgan chase': 'JPM',
+            'bank of america': 'BAC',
+            'wells fargo': 'WFC',
+            'goldman sachs': 'GS',
+            'morgan stanley': 'MS',
+            'citigroup': 'C',
+            'cisco': 'CSCO',
+            'intel': 'INTC',
+            'oracle': 'ORCL',
+            'salesforce': 'CRM',
+        }
+        
+        return mappings
+    
+    def _init_spacy(self):
+        """Initialize spaCy for entity recognition"""
+        try:
+            self.nlp = spacy.load("en_core_web_sm", disable=["parser"])
+            self.has_spacy = True
+        except:
+            logger.warning("SpaCy not available, using regex-only extraction")
+            self.nlp = None
+            self.has_spacy = False
+    
+    def extract_tickers(self, text: str, title: str = "") -> List[Tuple[str, float]]:
+        """
+        Extract ticker symbols with confidence scores
+        
+        Args:
+            text: Article content
+            title: Article title
+            
+        Returns:
+            List of (ticker, confidence) tuples
+        """
+        # Combine title and text for analysis
+        full_text = f"{title} {text}"
+        
+        # Results with confidence scores
+        ticker_scores = defaultdict(float)
+        
+        # 1. High confidence patterns (0.9)
+        high_conf_patterns = ['parenthetical', 'dollar_sign']
+        for pattern_name in high_conf_patterns:
+            pattern = PATTERNS[pattern_name]
+            for match in pattern.finditer(full_text):
+                ticker = match.group(1).upper()
+                if self._is_valid_ticker(ticker):
+                    ticker_scores[ticker] = max(ticker_scores[ticker], 0.9)
+                    self.extraction_stats[pattern_name] += 1
+                    if self.debug:
+                        logger.debug(f"Found {ticker} via {pattern_name}")
+        
+        # 2. Medium-high confidence patterns (0.8)
+        medium_high_patterns = ['exchange', 'stock_mention', 'action', 'analyst']
+        for pattern_name in medium_high_patterns:
+            pattern = PATTERNS[pattern_name]
+            for match in pattern.finditer(full_text):
+                ticker = match.group(1).upper()
+                if self._is_valid_ticker(ticker):
+                    ticker_scores[ticker] = max(ticker_scores[ticker], 0.8)
+                    self.extraction_stats[pattern_name] += 1
+        
+        # 3. Medium confidence patterns (0.7)
+        medium_patterns = ['trading']
+        for pattern_name in medium_patterns:
+            pattern = PATTERNS[pattern_name]
+            for match in pattern.finditer(full_text):
+                ticker = match.group(1).upper()
+                if self._is_valid_ticker(ticker) and self._has_financial_context(full_text, match.start()):
+                    ticker_scores[ticker] = max(ticker_scores[ticker], 0.7)
+                    self.extraction_stats[pattern_name] += 1
+        
+        # 4. Company name resolution (0.8)
+        text_lower = full_text.lower()
+        for company_name, ticker in self.company_to_ticker.items():
+            if company_name in text_lower and self._is_valid_ticker(ticker):
+                ticker_scores[ticker] = max(ticker_scores[ticker], 0.8)
+                self.extraction_stats['company_name'] += 1
+        
+        # 5. Handle possessive forms (e.g., "Apple's")
+        for match in PATTERNS['possessive'].finditer(full_text):
+            company = match.group(1).lower()
+            if company in self.company_to_ticker:
+                ticker = self.company_to_ticker[company]
+                if self._is_valid_ticker(ticker):
+                    ticker_scores[ticker] = max(ticker_scores[ticker], 0.8)
+                    self.extraction_stats['possessive'] += 1
+        
+        # 6. Use spaCy for additional entity recognition
+        if self.has_spacy and self.nlp:
+            doc = self.nlp(full_text)
+            for ent in doc.ents:
+                if ent.label_ == "ORG":
+                    org_lower = ent.text.lower()
+                    if org_lower in self.company_to_ticker:
+                        ticker = self.company_to_ticker[org_lower]
+                        if self._is_valid_ticker(ticker):
+                            ticker_scores[ticker] = max(ticker_scores[ticker], 0.7)
+                            self.extraction_stats['spacy_org'] += 1
+        
+        # Convert to sorted list
+        results = [(ticker, score) for ticker, score in ticker_scores.items()]
+        results.sort(key=lambda x: x[1], reverse=True)
+        
+        return results
+    
+    def _is_valid_ticker(self, ticker: str) -> bool:
+        """Check if ticker is valid"""
+        ticker = ticker.upper()
+        
+        # Exclude common names and non-ticker words
+        if ticker in EXCLUDED_NAMES:
+            return False
+        
+        # If we have a valid ticker list, check it
+        if self.valid_tickers:
+            return ticker in self.valid_tickers
+        
+        # Otherwise, apply basic rules
+        # Must be 1-5 letters, possibly with .A or .B suffix
+        if not re.match(r'^[A-Z]{1,5}(?:\.[A-Z])?$', ticker):
+            return False
+        
+        # Single letters need special validation
+        if len(ticker) == 1:
+            # Only allow known single-letter tickers
+            return ticker in {'C', 'F', 'T', 'V', 'X', 'K', 'M', 'O'}
+        
+        return True
+    
+    def _has_financial_context(self, text: str, position: int, window: int = 50) -> bool:
+        """Check if position has financial context nearby"""
+        start = max(0, position - window)
+        end = min(len(text), position + window)
+        context = text[start:end].lower()
+        
+        # Check for financial words
+        words = set(context.split())
+        return bool(words & FINANCIAL_CONTEXTS)
+    
+    def test_extraction(self):
+        """Test the extraction with known examples"""
         test_cases = [
             ("Apple (AAPL) stock rose 5%", [("AAPL", 0.9)]),
-            ("Buy MSFT shares on NYSE", [("MSFT", 0.9)]),
-            ("BRK.B trading at $350", [("BRK.B", 0.9)]),
-            ("Microsoft announced earnings", [
-             ("MSFT", 0.8)]) if "microsoft" in self.company_to_symbol else (None, []),
+            ("Buy MSFT shares on NYSE", [("MSFT", 0.8)]),
+            ("BRK.B trading at $350", [("BRK.B", 0.7)]),
+            ("$TSLA surged after earnings", [("TSLA", 0.9)]),
+            ("Microsoft announced new products", [("MSFT", 0.8)]),
+            ("Tim Cook said Apple is doing well", [("AAPL", 0.8)]),  # Should get AAPL, not COOK
+            ("C stock gained on banking news", [("C", 0.8)]),  # Single letter with context
         ]
-
+        
+        print("Running NER extraction tests...")
         passed = 0
+        
         for text, expected in test_cases:
-            if expected is None:
-                continue
-
-            article = {"title": text, "content": ""}
-            results = self.extract_symbols(article)
-
-            # Check if expected symbols are found
-            found_symbols = {sym for sym, _ in results}
-            expected_symbols = {sym for sym, _ in expected}
-
-            if expected_symbols.issubset(found_symbols):
+            results = self.extract_tickers(text)
+            result_tickers = {ticker for ticker, _ in results}
+            expected_tickers = {ticker for ticker, _ in expected}
+            
+            if expected_tickers.issubset(result_tickers):
                 passed += 1
-                logger.debug(f"✅ Test passed: '{text}' -> {results}")
+                print(f"✅ PASSED: '{text}' → {results}")
             else:
-                logger.warning(
-                    f"❌ Test failed: '{text}' -> {results}, expected {expected}")
+                print(f"❌ FAILED: '{text}' → {results}, expected {expected}")
+        
+        print(f"\nTest Summary: {passed}/{len(test_cases)} passed")
+        
+        # Print extraction statistics
+        print("\nExtraction Statistics:")
+        for method, count in sorted(self.extraction_stats.items()):
+            print(f"  {method}: {count}")
+        
+        return passed == len(test_cases)
 
-        logger.info(
-            f"Ticker extraction tests: {passed}/{len([e for _, e in test_cases if e is not None])} passed")
-        return passed == len([e for _, e in test_cases if e is not None])
+
+# Integration function for your pipeline
+def create_improved_ner(ticker_csv_path: str = None) -> ImprovedNER:
+    """Create an instance of the improved NER"""
+    return ImprovedNER(ticker_csv_path=ticker_csv_path, debug=False)
 
 
-# Convenience function for backward compatibility
-def get_enhanced_symbols(article: dict,
-                         ner_extractor: UnifiedNER = None,
-                         min_confidence: float = 0.6,
-                         use_metadata: bool = True) -> List[str]:
-    """
-    Extract symbols using enhanced NER (backward compatibility)
-
-    Args:
-        article: Article dictionary
-        ner_extractor: NER instance (creates new if None)
-        min_confidence: Minimum confidence threshold
-        use_metadata: Whether to use metadata symbols
-
-    Returns:
-        List of extracted symbols
-    """
-    if ner_extractor is None:
-        ner_extractor = UnifiedNER()
-
-    symbol_confidence_pairs = ner_extractor.extract_symbols(
-        article=article,
-        min_confidence=min_confidence,
-        use_metadata=use_metadata
-    )
-
-    # Return just symbols for backward compatibility
-    return [sym for sym, _ in symbol_confidence_pairs]
+if __name__ == "__main__":
+    # Test the improved NER
+    ner = ImprovedNER(debug=True)
+    ner.test_extraction()

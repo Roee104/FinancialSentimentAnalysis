@@ -2,7 +2,7 @@
 """Core functionality modules"""
 
 from core.sentiment import UnifiedSentimentAnalyzer
-from core.ner import UnifiedNER
+# from core.ner import UnifiedNER
 from core.text_processor import TextProcessor
 from core.aggregator import Aggregator
 

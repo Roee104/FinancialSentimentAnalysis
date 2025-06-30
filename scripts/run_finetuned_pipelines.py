@@ -40,7 +40,7 @@ def run_pipeline_with_adapter(model_name, adapter_path, output_file):
         "--pipeline", "optimized",
         "--adapter", str(adapter_path),
         "--aggregation", "conf_weighted",
-        "--input", "/content/FinancialSentiment/data/financial_news_2020_2025_100k.parquet",
+        "--input", str(root / "data" / "financial_news_2020_2025_100k.parquet"),
         "--output", str(output_file),
         "--batch-size", "32",
         "--max-articles", "3000"  # Process gold standard size

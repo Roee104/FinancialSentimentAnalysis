@@ -15,6 +15,17 @@ import argparse
 import logging
 import logging.config
 from config.settings import LOGGING_CONFIG
+try:
+    import core.ner
+    if not hasattr(core.ner, 'UnifiedNER') and hasattr(core.ner, 'ImprovedNER'):
+        core.ner.UnifiedNER = core.ner.ImprovedNER
+
+    # Use pretrained NER
+    from core.pretrained_financial_ner import FinancialNERWrapper
+    core.ner.UnifiedNER = FinancialNERWrapper
+    logger.info("Using pre-trained Financial NER")
+except Exception as e:
+    logger.warning(f"NER setup issue: {e}")
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 

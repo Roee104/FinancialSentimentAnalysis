@@ -40,7 +40,7 @@ class FinancialSentimentPipeline(BasePipeline):
         super().__init__(**kwargs)
 
         self.sentiment_mode = sentiment_mode
-         # map a single \"distance_weighted\" string to existing flags
+        # map a single \"distance_weighted\" string to existing flags
         if (agg_method or aggregation_method) == "distance_weighted":
             self.aggregation_method = "conf_weighted"   # keep confidence base
             self.use_distance_weighting = True
@@ -62,16 +62,18 @@ class FinancialSentimentPipeline(BasePipeline):
         # Initialize sentiment analyzer with adapter support
         logger.info(
             f"Loading sentiment analyzer ({self.sentiment_mode} mode)...")
-        
+
         # Get adapter path from config if present
-        adapter_path = self.config.get("sentiment_config", {}).get("adapter_path")
+        adapter_path = self.config.get(
+            "sentiment_config", {}).get("adapter_path")
         if adapter_path:
             logger.info(f"Using PEFT adapter: {adapter_path}")
-        
+
         self.sentiment_analyzer = UnifiedSentimentAnalyzer(
             mode=self.sentiment_mode,
             device=self.config.get("device"),
-            batch_size=self.config.get("sentiment_config", {}).get("batch_size", 16),
+            batch_size=self.config.get(
+                "sentiment_config", {}).get("batch_size", 16),
             adapter_path=adapter_path
         )
 
@@ -93,16 +95,17 @@ class FinancialSentimentPipeline(BasePipeline):
 
         logger.info("All components initialized successfully")
 
+
 class OptimizedPipeline(FinancialSentimentPipeline):
     """Optimized pipeline with bias correction"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, aggregation_method=None, **kwargs):
         # Remove use_distance_weighting from kwargs if present
         kwargs.pop('use_distance_weighting', None)
 
         super().__init__(
             sentiment_mode="optimized",
-            aggregation_method="conf_weighted",
+            aggregation_method=aggregation_method or "conf_weighted",  # Use provided or default
             aggregation_threshold=0.1,
             use_distance_weighting=True,
             **kwargs
