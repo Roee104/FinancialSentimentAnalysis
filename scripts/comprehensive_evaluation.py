@@ -1,22 +1,14 @@
-"""comprehensive_evaluation.py
+"""comprehensive_evaluation_extended.py
 ---------------------------------
-Evaluate one or more processed‑pipeline JSONL files against the gold‑standard
-annotations and write a summary report (`data/evaluation_results.json`).
-
-* Uses the default `GOLD_FILE` from `config.settings`, but you can override
-  with `--gold path/to/gold.jsonl`.
-* Supports `--split dev|all` where *dev* = deterministic 1 000‑row slice for
-  quick checks.
-
-Run examples
-~~~~~~~~~~~~
-$ python scripts/comprehensive_evaluation.py                 # full eval on all
-$ python scripts/comprehensive_evaluation.py --split dev     # fast sanity run
-$ python scripts/comprehensive_evaluation.py --gold data/...jsonl --split all
+Extended version that includes fine-tuned models in the evaluation.
+Based on the original comprehensive_evaluation.py but adds support for LoRA models.
 """
 from __future__ import annotations
 
-import argparse, json, random, sys
+import argparse
+import json
+import random
+import sys
 from pathlib import Path
 from typing import Dict, List
 
@@ -31,16 +23,12 @@ from sklearn.metrics import (
 from config.settings import GOLD_FILE
 
 # ---------------------------------------------------------------------------
-# Helper --------------------------------------------------------------------
+# Helper functions (same as original)
 # ---------------------------------------------------------------------------
 
-def load_gold(file: Path, split: str = "all", seed: int = 42):
-    """Return gold_standard dict & gold_ticker_sentiments dict.
 
-    *split*:
-      **all** – full file.
-      **dev** – deterministic first 1 000 (or full file if <1 000).
-    """
+def load_gold(file: Path, split: str = "all", seed: int = 42):
+    """Return gold_standard dict & gold_ticker_sentiments dict."""
     gold: Dict[str, str] = {}
     gold_tickers: Dict[str, Dict] = {}
 
@@ -99,7 +87,8 @@ def evaluate_pipeline(result_path: Path, gold: Dict, gold_tickers: Dict):
     prec, rec, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, labels=["Positive", "Neutral", "Negative"], average="macro"
     )
-    cm = confusion_matrix(y_true, y_pred, labels=["Positive", "Neutral", "Negative"])
+    cm = confusion_matrix(y_true, y_pred, labels=[
+                          "Positive", "Neutral", "Negative"])
 
     prec_c, rec_c, f1_c, _ = precision_recall_fscore_support(
         y_true, y_pred, labels=["Positive", "Neutral", "Negative"], average=None
@@ -115,24 +104,33 @@ def evaluate_pipeline(result_path: Path, gold: Dict, gold_tickers: Dict):
         "confusion_matrix": cm.tolist(),
         "n_samples": len(y_true),
         "ticker_accuracy": ticker_acc,
+        "ticker_stats": {
+            "correct": ticker_ok,
+            "total": total_ticker
+        },
         "per_class": {
-            lab: {"precision": float(prec_c[i]), "recall": float(rec_c[i]), "f1": float(f1_c[i])}
+            lab: {"precision": float(prec_c[i]), "recall": float(
+                rec_c[i]), "f1": float(f1_c[i])}
             for i, lab in enumerate(["Positive", "Neutral", "Negative"])
         },
     }
 
 
 # ---------------------------------------------------------------------------
-# Main ----------------------------------------------------------------------
+# Main (extended to include fine-tuned models)
 # ---------------------------------------------------------------------------
 
 def main(argv: List[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Evaluate processed pipeline outputs against gold standard",
+        description="Evaluate ALL pipeline outputs including fine-tuned models",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--gold", type=Path, default=Path(GOLD_FILE), help="Gold‑standard JSONL path")
-    parser.add_argument("--split", choices=["all", "dev"], default="all", help="Subset to evaluate")
+    parser.add_argument(
+        "--gold", type=Path, default=Path(GOLD_FILE), help="Gold‑standard JSONL path")
+    parser.add_argument(
+        "--split", choices=["all", "dev"], default="all", help="Subset to evaluate")
+    parser.add_argument("--include-finetuned", action="store_true", default=True,
+                        help="Include fine-tuned models in evaluation")
     args = parser.parse_args(argv)
 
     gold_path: Path = args.gold
@@ -142,12 +140,21 @@ def main(argv: List[str] | None = None):
     gold_standard, gold_tickers = load_gold(gold_path, split=split)
     print(f"Loaded {len(gold_standard)} gold annotations (split={split})")
 
+    # Extended pipeline list including fine-tuned models
     pipelines = {
         "Standard": "data/processed_articles_standard.jsonl",
         "Optimized": "data/processed_articles_optimized.jsonl",
         "VADER": "data/vader_baseline_results.jsonl",
         "Calibrated": "data/processed_articles_calibrated.jsonl",
     }
+
+    # Add fine-tuned models if requested
+    if args.include_finetuned:
+        pipelines.update({
+            "FinBERT-LoRA": "data/processed_articles_finetuned_finbert.jsonl",
+            "DeBERTa-LoRA": "data/processed_articles_finetuned_deberta.jsonl",
+            "Distance-Weighted": "data/processed_articles_distance_weighted.jsonl",
+        })
 
     results = {}
 
@@ -164,25 +171,40 @@ def main(argv: List[str] | None = None):
         results[name] = metrics
 
         # pretty print summary for this pipeline
-        print("Overall Accuracy:", f"{metrics['accuracy']:.3f}")
-        print("Macro F1:        ", f"{metrics['macro_f1']:.3f}")
+        print(f"Overall Accuracy: {metrics['accuracy']:.3f}")
+        print(f"Macro F1:         {metrics['macro_f1']:.3f}")
         if metrics["ticker_accuracy"] is not None:
-            print("Ticker Acc.:     ", f"{metrics['ticker_accuracy']:.3f} (n={len(gold_tickers)})")
+            ticker_stats = metrics.get("ticker_stats", {})
+            print(f"Ticker Acc:       {metrics['ticker_accuracy']:.3f} " +
+                  f"({ticker_stats.get('correct', 0)}/{ticker_stats.get('total', 0)})")
 
     # save json
-    out = Path("data/evaluation_results.json")
+    out = Path("data/evaluation_results_extended.json")
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(results, indent=2))
-    print("\n[✓] Saved", out)
+    print(f"\n[✓] Saved {out}")
 
-    # tiny summary table
-    print("\n" + "=" * 60)
+    # Enhanced summary table
+    print("\n" + "=" * 70)
     print("SUMMARY")
-    print("=" * 60)
-    print(f"{'Pipeline':<12} | {'Accuracy':<8} | {'Macro‑F1':<8} | Samples")
-    print("-" * 50)
-    for n, m in results.items():
-        print(f"{n:<12} | {m['accuracy']:.3f}    | {m['macro_f1']:.3f}   | {m['n_samples']}")
+    print("=" * 70)
+    print(f"{'Pipeline':<15} | {'Accuracy':<8} | {'Macro‑F1':<8} | {'Ticker Acc':<10} | Samples")
+    print("-" * 70)
+
+    # Sort by Macro F1 score
+    sorted_results = sorted(
+        results.items(), key=lambda x: x[1]['macro_f1'], reverse=True)
+
+    for n, m in sorted_results:
+        ticker_acc_str = f"{m['ticker_accuracy']:.3f}" if m['ticker_accuracy'] is not None else "N/A"
+        print(
+            f"{n:<15} | {m['accuracy']:.3f}    | {m['macro_f1']:.3f}    | {ticker_acc_str:<10} | {m['n_samples']}")
+
+    # Find best model
+    if sorted_results:
+        best_name, best_metrics = sorted_results[0]
+        print(
+            f"\n🏆 Best Model: {best_name} (Macro F1: {best_metrics['macro_f1']:.3f})")
 
 
 if __name__ == "__main__":

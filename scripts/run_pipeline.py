@@ -145,7 +145,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logger.info(f"🏃 Running {args.pipeline} pipeline")
         pipeline = create_pipeline(
-            mode=args.pipeline,
+            # mode=args.pipeline,
+            pipeline_type=args.pipeline,
             input_parquet=cfg.get("input_parquet", INPUT_PARQUET),
             output_jsonl=cfg.get("processed_output", PROCESSED_OUTPUT),
             **cfg

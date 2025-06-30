@@ -2,22 +2,6 @@
 
 A *single‑purpose* runner that fine‑tunes a transformer for sentiment
 classification using **LoRA** (or full fine‑tune) and logs experiment metadata.
-It replaces the old "batch pipeline" script so that we can train FinBERT and
-DeBERTa‑Fin on the **3 000‑article gold standard** and save compact LoRA
-adapters under `models/lora/<model>/<timestamp>/`.
-
-Run examples
-------------
-```powershell
-python -m scripts.run_experiments --model finbert --lora --epochs 2 --lr 2e-5 \
-       --rank 8 --alpha 32 --gold data/3000_gold_standard.jsonl
-```
-
-Key behaviour
--------------
-* Creates `experiments/<timestamp>_<model>_lora.json` with args + metrics.
-* Saves adapter to `models/lora/<model>/<timestamp>/`.
-* Prints the adapter path to **STDERR** so calling wrappers can capture it.
 """
 
 from __future__ import annotations
@@ -35,6 +19,10 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                           Trainer, TrainingArguments)
+
+# Fix NumPy 2.0 compatibility issue
+import numpy as np
+np.set_printoptions(legacy='1.25')
 
 # ------------------------------------------------  logging setup
 logging.basicConfig(
@@ -144,10 +132,8 @@ def main(argv: List[str] | None = None) -> None:
     LOG.info("📜 Gold:  %s", args.gold)
 
     # --- map shortcut → HF model id
-    # Using alternative DeBERTa models that actually exist
     HF_ID = {
         "finbert": "ProsusAI/finbert",
-        # Alternative that exists
         "deberta-fin": "mrm8488/deberta-v3-ft-financial-news-sentiment-analysis",
     }[args.model]
 
@@ -157,15 +143,23 @@ def main(argv: List[str] | None = None) -> None:
         HF_ID, num_labels=3)
 
     if args.lora:
+        # Different target modules for different models
+        if args.model == "finbert":
+            target_modules = ["query", "value"]  # BERT-based models
+        else:  # deberta
+            # Based on environment check output
+            target_modules = ["query_proj", "value_proj"]  # DeBERTa models
+
         lora_cfg = LoraConfig(
             r=args.rank,
             lora_alpha=args.alpha,
-            target_modules=["query", "value"],
+            target_modules=target_modules,
             lora_dropout=0.05,
             bias="none"
         )
         model = get_peft_model(model, lora_cfg)
-        LOG.info("🔧 Enabled LoRA ‑ rank=%d alpha=%d", args.rank, args.alpha)
+        LOG.info("🔧 Enabled LoRA ‑ rank=%d alpha=%d, modules=%s",
+                 args.rank, args.alpha, target_modules)
 
     # dataset
     ds = load_gold_dataset(args.gold)
@@ -178,10 +172,11 @@ def main(argv: List[str] | None = None) -> None:
     ds["train"] = ds["train"].map(tokenize, batched=True)
     ds["validation"] = ds["validation"].map(tokenize, batched=True)
 
-    ds["train"].set_format(type="torch", columns=[
-                           "input_ids", "attention_mask", "label"])
-    ds["validation"].set_format(type="torch", columns=[
-                                "input_ids", "attention_mask", "label"])
+    # Set format without copy issues (NumPy 2.0 fix)
+    ds["train"] = ds["train"].with_format(
+        "torch", columns=["input_ids", "attention_mask", "label"])
+    ds["validation"] = ds["validation"].with_format(
+        "torch", columns=["input_ids", "attention_mask", "label"])
 
     out_dir = MODELS_DIR / args.model / timestamp()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -192,12 +187,13 @@ def main(argv: List[str] | None = None) -> None:
         learning_rate=args.lr,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         logging_strategy="epoch",
         save_strategy="no",
         load_best_model_at_end=False,
         fp16=torch.cuda.is_available(),
         report_to=[],
+        label_names=["labels"],  # Explicitly set label names
     )
 
     trainer = Trainer(
