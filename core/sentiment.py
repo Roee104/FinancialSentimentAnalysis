@@ -12,6 +12,7 @@ import torch
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from pathlib import Path
+import json
 
 # ───────────────────────────────  logging at import  ──────────────────────────
 import logging
@@ -26,6 +27,13 @@ except ImportError:
     logger.warning("PEFT not available - adapter loading disabled")
 
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Model mappings for adapters
+ADAPTER_MODEL_MAP = {
+    "finbert": "yiyanghkust/finbert-tone",
+    "deberta-fin": "mrm8488/deberta-v3-ft-financial-news-sentiment-analysis",
+    "deberta": "mrm8488/deberta-v3-ft-financial-news-sentiment-analysis",
+}
 
 
 class UnifiedSentimentAnalyzer:
@@ -48,8 +56,51 @@ class UnifiedSentimentAnalyzer:
         **kwargs,
     ):
         self.mode = mode
-        self.model_name = model_name or MODELS["finbert"]
         self.adapter_path = adapter_path
+
+        # Determine which base model to use based on adapter path
+        if adapter_path:
+            adapter_path_str = str(adapter_path).lower()
+
+            # Check adapter config to determine base model
+            adapter_config_path = Path(adapter_path) / "adapter_config.json"
+            if adapter_config_path.exists():
+                try:
+                    with open(adapter_config_path, 'r') as f:
+                        adapter_config = json.load(f)
+                    base_model_name = adapter_config.get(
+                        "base_model_name_or_path", "")
+
+                    # Map to our known models
+                    if "deberta" in base_model_name.lower():
+                        self.model_name = ADAPTER_MODEL_MAP["deberta-fin"]
+                        logger.info(
+                            f"Detected DeBERTa adapter, using model: {self.model_name}")
+                    elif "finbert" in base_model_name.lower():
+                        self.model_name = MODELS["finbert"]
+                        logger.info(
+                            f"Detected FinBERT adapter, using model: {self.model_name}")
+                    else:
+                        # Fallback to path-based detection
+                        if "deberta" in adapter_path_str:
+                            self.model_name = ADAPTER_MODEL_MAP["deberta-fin"]
+                        else:
+                            self.model_name = model_name or MODELS["finbert"]
+                except Exception as e:
+                    logger.warning(f"Could not read adapter config: {e}")
+                    # Fallback to path-based detection
+                    if "deberta" in adapter_path_str:
+                        self.model_name = ADAPTER_MODEL_MAP["deberta-fin"]
+                    else:
+                        self.model_name = model_name or MODELS["finbert"]
+            else:
+                # Fallback to path-based detection
+                if "deberta" in adapter_path_str:
+                    self.model_name = ADAPTER_MODEL_MAP["deberta-fin"]
+                else:
+                    self.model_name = model_name or MODELS["finbert"]
+        else:
+            self.model_name = model_name or MODELS["finbert"]
 
         # ---- config overrides ------------------------------------------------
         self.config = SENTIMENT_CONFIG.copy()
@@ -74,9 +125,13 @@ class UnifiedSentimentAnalyzer:
             adapter_path = Path(self.adapter_path)
             if adapter_path.exists():
                 logger.info(f"Loading PEFT adapter from {adapter_path}")
-                self.model = PeftModel.from_pretrained(
-                    self.model, str(adapter_path))
-                logger.info("✅ PEFT adapter loaded successfully")
+                try:
+                    self.model = PeftModel.from_pretrained(
+                        self.model, str(adapter_path))
+                    logger.info("✅ PEFT adapter loaded successfully")
+                except Exception as e:
+                    logger.error(f"Failed to load PEFT adapter: {e}")
+                    raise
             else:
                 logger.warning(f"Adapter path not found: {adapter_path}")
         elif self.adapter_path and not PEFT_AVAILABLE:
@@ -121,94 +176,27 @@ class UnifiedSentimentAnalyzer:
         self, texts: List[str], batch_size: int, max_length: Optional[int]
     ) -> List[Dict]:
         max_length = max_length or self.config["max_length"]
-        return self._batched_predict(texts, batch_size, max_length)
-
-    def _predict_optimized(
-        self, texts: List[str], batch_size: int, max_length: Optional[int]
-    ) -> List[Dict]:
-        max_length = max_length or self.config["max_length"]
-        results = self._batched_predict(texts, batch_size, max_length)
-
-        # Light bias correction
-        for res in results:
-            scores = res["scores"]
-            if scores["Neutral"] > 0.8:
-                # Scale down neutral
-                neutral_adj = scores["Neutral"] * 0.8
-                pos_adj = scores["Positive"] + \
-                    (scores["Neutral"] - neutral_adj) * 0.6
-                neg_adj = scores["Negative"] + \
-                    (scores["Neutral"] - neutral_adj) * 0.4
-
-                # Normalize
-                total = neutral_adj + pos_adj + neg_adj
-                scores["Neutral"] = neutral_adj / total
-                scores["Positive"] = pos_adj / total
-                scores["Negative"] = neg_adj / total
-
-                # Update label
-                max_label = max(scores, key=scores.get)
-                res["label"] = max_label
-                res["confidence"] = scores[max_label]
-
-        return results
-
-    def _predict_calibrated(
-        self, texts: List[str], batch_size: int, max_length: Optional[int]
-    ) -> List[Dict]:
-        max_length = max_length or self.config["max_length"]
-        results = self._batched_predict(texts, batch_size, max_length)
-
-        # Stronger calibration
-        for res in results:
-            scores = res["scores"]
-            if scores["Neutral"] > 0.6:
-                # More aggressive adjustment
-                neutral_adj = scores["Neutral"] * 0.6
-                pos_adj = scores["Positive"] + \
-                    (scores["Neutral"] - neutral_adj) * 0.55
-                neg_adj = scores["Negative"] + \
-                    (scores["Neutral"] - neutral_adj) * 0.45
-
-                # Normalize
-                total = neutral_adj + pos_adj + neg_adj
-                scores["Neutral"] = neutral_adj / total
-                scores["Positive"] = pos_adj / total
-                scores["Negative"] = neg_adj / total
-
-                # Update label
-                max_label = max(scores, key=scores.get)
-                res["label"] = max_label
-                res["confidence"] = scores[max_label]
-
-        return results
-
-    # ----------------------------------------------------------------- helpers
-    def _batched_predict(
-        self, texts: List[str], batch_size: int, max_length: int
-    ) -> List[Dict]:
         results = []
-        total_batches = (len(texts) + batch_size - 1) // batch_size
 
         for i in range(0, len(texts), batch_size):
-            batch_idx = i // batch_size + 1
             batch = texts[i: i + batch_size]
-            self.stats["batches_processed"] += 1
-
             try:
-                inputs = self.tokenizer(
+                encoded = self.tokenizer(
                     batch,
-                    return_tensors="pt",
-                    truncation=True,
                     padding=True,
+                    truncation=True,
                     max_length=max_length,
-                ).to(self.device)
+                    return_tensors="pt",
+                )
+                input_ids = encoded["input_ids"].to(self.device)
+                attn_mask = encoded["attention_mask"].to(self.device)
 
                 with torch.no_grad():
-                    outputs = self.model(**inputs)
+                    outputs = self.model(
+                        input_ids=input_ids, attention_mask=attn_mask)
                     logits = outputs.logits
-                    probs = F.softmax(logits, dim=-1).cpu().numpy()
 
+                probs = F.softmax(logits, dim=-1)
                 for idx, text in enumerate(batch):
                     p = probs[idx]
                     pred_idx = p.argmax()
@@ -240,6 +228,62 @@ class UnifiedSentimentAnalyzer:
                         )
                     )
                 self.stats["errors"] += len(batch)
+
+        return results
+
+    # ---- optimized mode (light de-biasing) ----------------------------------
+    def _predict_optimized(
+        self, texts: List[str], batch_size: int, max_length: Optional[int]
+    ) -> List[Dict]:
+        results = self._predict_standard(texts, batch_size, max_length)
+
+        for r in results:
+            # reduce neutral
+            n_score = r["scores"]["Neutral"]
+            p_score = r["scores"]["Positive"]
+            neg_score = r["scores"]["Negative"]
+
+            n_adj = n_score * 0.8
+            p_adj = p_score * 1.1
+            neg_adj = neg_score * 1.1
+            total_adj = n_adj + p_adj + neg_adj
+
+            r["scores"]["Neutral"] = n_adj / total_adj
+            r["scores"]["Positive"] = p_adj / total_adj
+            r["scores"]["Negative"] = neg_adj / total_adj
+
+            # re-predict
+            best_idx = max(
+                range(3), key=lambda i: list(r["scores"].values())[i])
+            r["label"] = list(r["scores"].keys())[best_idx]
+            r["confidence"] = list(r["scores"].values())[best_idx]
+
+        return results
+
+    # ---- calibrated mode (stronger) -----------------------------------------
+    def _predict_calibrated(
+        self, texts: List[str], batch_size: int, max_length: Optional[int]
+    ) -> List[Dict]:
+        results = self._predict_standard(texts, batch_size, max_length)
+
+        for r in results:
+            n_score = r["scores"]["Neutral"]
+            p_score = r["scores"]["Positive"]
+            neg_score = r["scores"]["Negative"]
+
+            n_adj = n_score * 0.65
+            p_adj = p_score * 1.15
+            neg_adj = neg_score * 1.15
+            total_adj = n_adj + p_adj + neg_adj
+
+            r["scores"]["Neutral"] = n_adj / total_adj
+            r["scores"]["Positive"] = p_adj / total_adj
+            r["scores"]["Negative"] = neg_adj / total_adj
+
+            best_idx = max(
+                range(3), key=lambda i: list(r["scores"].values())[i])
+            r["label"] = list(r["scores"].keys())[best_idx]
+            r["confidence"] = list(r["scores"].values())[best_idx]
 
         return results
 

@@ -40,10 +40,11 @@ def run_pipeline_with_adapter(model_name, adapter_path, output_file):
         "--pipeline", "optimized",
         "--adapter", str(adapter_path),
         "--aggregation", "conf_weighted",
-        "--input", str(root / "data" / "financial_news_2020_2025_100k.parquet"),
+        "--input", str(root / "data" /
+                       "financial_news_2020_2025_100k.parquet"),
         "--output", str(output_file),
-        "--batch-size", "32",
-        "--max-articles", "3000"  # Process gold standard size
+        "--batch-size", "32"
+        # NO --max-articles limit - process all articles
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -90,73 +91,92 @@ pipelines = {
 
 results = {}
 
-for name, path_str in pipelines.items():
-    path = Path(path_str)
+for name, path in pipelines.items():
+    path = Path(path)
+    
     if not path.exists():
-        print(f"\\nSkipping {name} - file not found")
+        print(f"⚠️  {name} results not found at {path}")
         continue
         
-    print(f"\\n{'='*50}")
-    print(f"Evaluating {name}")
-    print('='*50)
+    # Load predictions
+    predictions = {}
+    ticker_predictions = {}
     
-    y_true = []
-    y_pred = []
-    ticker_ok = total_ticker = 0
-    
-    with open(path, "r") as f:
+    with open(path, 'r') as f:
         for line in f:
             try:
-                pred = json.loads(line)
-                h = pred.get("article_hash")
-                if h not in gold_standard:
-                    continue
+                article = json.loads(line)
+                h = article.get("article_hash")
+                if h and h in gold_standard:
+                    predictions[h] = article["overall_sentiment"]
                     
-                y_true.append(gold_standard[h])
-                y_pred.append(pred["overall_sentiment"])
-                
-                # Ticker evaluation
-                if h in gold_tickers:
-                    g_map = gold_tickers[h]
-                    p_map = {t["symbol"]: t for t in pred.get("tickers", [])}
-                    for sym, g_info in g_map.items():
-                        if sym in p_map:
-                            total_ticker += 1
-                            if p_map[sym]["label"] == g_info["sentiment"]:
-                                ticker_ok += 1
+                    # Extract ticker predictions
+                    if "tickers" in article:
+                        ticker_predictions[h] = {
+                            t["symbol"]: t["label"] 
+                            for t in article["tickers"] 
+                            if "symbol" in t and "label" in t
+                        }
             except Exception as e:
                 continue
     
-    if not y_true:
-        print(f"No matching articles found for {name}")
+    if not predictions:
+        print(f"⚠️  No valid predictions found for {name}")
         continue
         
+    # Align predictions with gold standard
+    y_true = []
+    y_pred = []
+    
+    for h in gold_standard:
+        if h in predictions:
+            y_true.append(gold_standard[h])
+            y_pred.append(predictions[h])
+    
     # Calculate metrics
     acc = accuracy_score(y_true, y_pred)
     prec, rec, f1, _ = precision_recall_fscore_support(
-        y_true, y_pred, labels=["Positive", "Neutral", "Negative"], average="macro"
+        y_true, y_pred, average="macro", zero_division=0
     )
-    ticker_acc = ticker_ok / total_ticker if total_ticker else 0
+    
+    # Calculate ticker accuracy
+    ticker_correct = 0
+    ticker_total = 0
+    
+    for h in gold_tickers:
+        if h in ticker_predictions:
+            gold_t = gold_tickers[h]
+            pred_t = ticker_predictions[h]
+            
+            for symbol in gold_t:
+                if symbol in pred_t:
+                    ticker_total += 1
+                    if gold_t[symbol] == pred_t[symbol]:
+                        ticker_correct += 1
+    
+    ticker_acc = ticker_correct / ticker_total if ticker_total > 0 else 0
     
     results[name] = {
-        "accuracy": acc,
-        "macro_f1": f1,
-        "ticker_accuracy": ticker_acc,
-        "n_samples": len(y_true),
-        "ticker_ok": ticker_ok,
-        "total_ticker": total_ticker
+        "accuracy": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+        "macro_f1": float(f1),
+        "ticker_accuracy": float(ticker_acc),
+        "samples": len(y_pred),
+        "ticker_samples": ticker_total
     }
     
-    # Print results
-    print(f"Overall Accuracy: {acc:.3f}")
-    print(f"Macro F1:         {f1:.3f}")
-    print(f"Ticker Accuracy:  {ticker_acc:.3f} ({ticker_ok}/{total_ticker})")
+    print(f"\\n{name}:")
+    print(f"  Overall Accuracy: {acc:.4f}")
+    print(f"  Macro F1: {f1:.4f}")
+    print(f"  Ticker Accuracy: {ticker_acc:.4f} ({ticker_total} samples)")
 
 # Save results
-with open("data/finetuned_evaluation_results.json", "w") as f:
+output_file = Path("data/finetuned_evaluation_results.json")
+with open(output_file, 'w') as f:
     json.dump(results, f, indent=2)
-    
-print("\\n✅ Evaluation complete! Results saved to data/finetuned_evaluation_results.json")
+
+print(f"\\n📄 Results saved to {output_file}")
 
 # Return results for further processing
 print(json.dumps(results))
@@ -211,9 +231,11 @@ def run_aggregation_ablation(best_adapter_path):
         "--pipeline", "optimized",
         "--adapter", str(best_adapter_path),
         "--aggregation", "distance_weighted",
+        "--input", str(root / "data" /
+                       "financial_news_2020_2025_100k.parquet"),
         "--output", str(output_file),
-        "--batch-size", "32",
-        "--max-articles", "3000"
+        "--batch-size", "32"
+        # NO --max-articles limit - process all articles
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -263,8 +285,8 @@ def main():
     # Exit if no adapters were found
     if not adapter_found:
         print("\n❌ ERROR: No adapters found! Please run the fine-tuning scripts first.")
-        print("   Run: python -m scripts.run_finbert_lora")
-        print("   Run: python -m scripts.run_deberta_lora")
+        print("   Run: python -m scripts.run_experiments --model finbert --lora --gold data/3000_gold_standard.jsonl")
+        print("   Run: python -m scripts.run_experiments --model deberta-fin --lora --gold data/3000_gold_standard.jsonl")
         sys.exit(1)
 
     # Exit if no successful pipeline runs

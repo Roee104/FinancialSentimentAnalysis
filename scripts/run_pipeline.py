@@ -3,10 +3,10 @@
 #  Main entry-point for running any Financial-Sentiment-Analysis pipeline
 # ────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
-from config.settings import PROCESSED_OUTPUT, INPUT_PARQUET
-from pipelines.baselines import VADERBaseline
-from pipelines.main_pipeline import create_pipeline
 from utils.config_loader import load_config
+from pipelines.main_pipeline import create_pipeline
+from pipelines.baselines import VADERBaseline
+from config.settings import PROCESSED_OUTPUT, INPUT_PARQUET
 import sys
 from pathlib import Path
 import argparse
@@ -15,6 +15,11 @@ import argparse
 import logging
 import logging.config
 from config.settings import LOGGING_CONFIG
+
+logging.config.dictConfig(LOGGING_CONFIG)
+logger = logging.getLogger(__name__)
+
+# -------------------------------------------------------  NER monkey-patch  ---
 try:
     import core.ner
     if not hasattr(core.ner, 'UnifiedNER') and hasattr(core.ner, 'ImprovedNER'):
@@ -26,10 +31,6 @@ try:
     logger.info("Using pre-trained Financial NER")
 except Exception as e:
     logger.warning(f"NER setup issue: {e}")
-logging.config.dictConfig(LOGGING_CONFIG)
-logger = logging.getLogger(__name__)
-
-# ----------------------------------------------------------  stdlib / 3rd-party
 
 # ----------------------------------------------------------  internal imports
 
@@ -83,51 +84,75 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--method", "--agg-method",
                    dest="agg_method",
                    choices=["default", "majority", "conf_weighted"],
-                   help="(Deprecated) Use --aggregation instead")
+                   help="Aggregation method (legacy)")
 
-    p.add_argument("--threshold", type=float)
-    p.add_argument("--no-distance-weighting", action="store_true")
+    # Additional controls
+    p.add_argument("--threshold", type=float,
+                   help="Sentiment threshold (0.0-1.0)")
+    p.add_argument("--no-distance-weighting", action="store_true",
+                   help="Disable distance-based weighting")
 
-    # VADER
-    p.add_argument("--vader-threshold", type=float, default=0.05)
+    # VADER-specific
+    p.add_argument("--vader-threshold", type=float, default=0.05,
+                   help="VADER sentiment threshold")
 
-    # Logging
-    p.add_argument(
-        "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    # Dev options
+    p.add_argument("--device", choices=["cpu", "cuda", "mps"],
+                   help="Compute device")
+    p.add_argument("--checkpoint-interval", type=int,
+                   help="Save checkpoint every N batches")
 
     return p
 
 
-def main(argv: list[str] | None = None) -> None:
+def main():
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
 
-    # Dynamic log level
-    if args.log_level:
-        logging.getLogger().setLevel(args.log_level)
+    # --------------------------------------------------------- config loading
+    # Load base configuration from YAML if provided
+    if args.config:
+        logger.info(f"Loading config from {args.config}")
+        cfg = load_config(args.config)
+    else:
+        cfg = {}
 
-    # ------------------------------------------------------------------ config
-    config_path = Path(args.config) if args.config else None
-    cfg = load_config(config_path, parse_cli=False)
+    # Ensure nested config safety
+    cfg.setdefault("pipeline_config", {})
+    cfg.setdefault("sentiment_config", {})
+    cfg.setdefault("aggregation_config", {})
 
-    # CLI overrides
-    if args.input:
-        cfg["input_parquet"] = args.input
-    if args.output:
-        cfg["processed_output"] = args.output
-    if args.batch_size:
+    # --------------------------------------------------------- override w/ CLI
+    # Input/output paths - CRITICAL FIX: Use args directly
+    input_path = args.input or cfg.get("input_parquet", INPUT_PARQUET)
+    output_path = args.output or cfg.get("processed_output", PROCESSED_OUTPUT)
+
+    # Store paths in config for pipeline
+    cfg["input_parquet"] = input_path
+    cfg["processed_output"] = output_path
+
+    # Pipeline config
+    if args.batch_size is not None:
         cfg["pipeline_config"]["batch_size"] = args.batch_size
-    if args.sentiment_batch_size:
-        cfg["sentiment_config"]["batch_size"] = args.sentiment_batch_size
-    if args.max_articles:
+    if args.max_articles is not None:
         cfg["pipeline_config"]["max_articles"] = args.max_articles
     if args.start_from:
         cfg["pipeline_config"]["start_from"] = args.start_from
     if args.no_resume:
         cfg["pipeline_config"]["resume"] = False
+    if args.checkpoint_interval:
+        cfg["pipeline_config"]["checkpoint_interval"] = args.checkpoint_interval
+
+    # Sentiment config
     if args.sentiment_mode:
         cfg["sentiment_config"]["mode"] = args.sentiment_mode
-    if args.threshold:
+    if args.sentiment_batch_size:
+        cfg["sentiment_config"]["batch_size"] = args.sentiment_batch_size
+    if args.device:
+        cfg["device"] = args.device
+
+    # Aggregation config
+    if args.threshold is not None:
         cfg["aggregation_config"]["aggregation_threshold"] = args.threshold
 
     # Handle aggregation method
@@ -152,26 +177,41 @@ def main(argv: list[str] | None = None) -> None:
     # ---------------------------------------------------------- build pipeline
     if args.pipeline == "vader":
         logger.info("🏃 Running VADER baseline")
-        pipeline = VADERBaseline(threshold=args.vader_threshold, **cfg)
+        pipeline = VADERBaseline(
+            input_path=input_path,
+            output_path=output_path,
+            vader_threshold=args.vader_threshold,
+            **cfg
+        )
     else:
         logger.info(f"🏃 Running {args.pipeline} pipeline")
+        logger.info(f"📄 Input: {input_path}")
+        logger.info(f"📄 Output: {output_path}")
+
+        # CRITICAL FIX: Pass input_path and output_path explicitly
         pipeline = create_pipeline(
-            # mode=args.pipeline,
             pipeline_type=args.pipeline,
-            input_parquet=cfg.get("input_parquet", INPUT_PARQUET),
-            output_jsonl=cfg.get("processed_output", PROCESSED_OUTPUT),
+            input_path=input_path,
+            output_path=output_path,
             **cfg
         )
 
     # ---------------------------------------------------------------- process
-    result = pipeline.process()
+    # Extract pipeline-specific parameters
+    pipeline_params = cfg.get("pipeline_config", {})
 
-    if result.success:
-        logger.info(f"✅ Success! Processed {result.total_processed} articles")
-        logger.info(f"📄 Output: {result.output_path}")
-    else:
-        logger.error(f"❌ Pipeline failed: {result.error}")
-        sys.exit(1)
+    # Run the pipeline using the correct method
+    pipeline.run(
+        max_articles=pipeline_params.get("max_articles"),
+        start_from=pipeline_params.get("start_from", 0),
+        checkpoint_interval=pipeline_params.get("checkpoint_interval")
+    )
+
+    # Print final statistics
+    logger.info(f"✅ Pipeline completed successfully!")
+    logger.info(f"📄 Output: {pipeline.output_path}")
+    logger.info(f"📊 Processed: {pipeline.stats['processed']} articles")
+    logger.info(f"⚠️  Errors: {pipeline.stats['errors']}")
 
 
 if __name__ == "__main__":

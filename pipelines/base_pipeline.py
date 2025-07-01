@@ -105,6 +105,10 @@ class BasePipeline(ABC):
 
         logger.info(f"Initialized {self.__class__.__name__}")
 
+    def process(self, *args, **kwargs):
+        """Deprecated - use run() instead"""
+        return self.run(*args, **kwargs)
+
     def _load_ticker_to_company(self) -> Dict[str, str]:
         """Load ticker to company name mapping"""
         try:
@@ -454,7 +458,8 @@ class BasePipeline(ABC):
 
         # NER stats
         if self.ner:
-            ner_stats = self.ner.get_extraction_stats()
+            if self.ner and hasattr(self.ner, 'extraction_stats'):
+                ner_stats = self.ner.extraction_stats
             if ner_stats:
                 print("\\nNER Extraction Methods:")
                 for method, count in sorted(ner_stats.items(),

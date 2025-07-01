@@ -556,17 +556,29 @@ class FinancialNERWrapper(PretrainedFinancialNER):
         """Compatibility method"""
         return [self._clean_symbol(s) for s in symbols if s]
 
-    def handle_symbols_array(self, symbols_raw) -> List[str]:
-        """Compatibility method"""
+    def handle_symbols_array(self, symbols_raw):
+        """Handle various formats of symbols array from dataframe"""
+        import numpy as np
+
         if symbols_raw is None:
             return []
         elif isinstance(symbols_raw, np.ndarray):
-            return symbols_raw.tolist()
+            symbols_list = symbols_raw.tolist()
+            if symbols_list and isinstance(symbols_list[0], (list, np.ndarray)):
+                symbols_list = [
+                    item for sublist in symbols_list for item in sublist]
+            return [str(s).strip() for s in symbols_list if s]
         elif isinstance(symbols_raw, list):
-            return symbols_raw
+            return [str(s).strip() for s in symbols_raw if s]
         elif isinstance(symbols_raw, str):
-            return [symbols_raw]
-        return []
+            if ',' in symbols_raw:
+                return [s.strip() for s in symbols_raw.split(',') if s.strip()]
+            return [symbols_raw.strip()] if symbols_raw.strip() else []
+        else:
+            try:
+                return [str(symbols_raw).strip()]
+            except:
+                return []
 
 
 def install_finbert_ner():
