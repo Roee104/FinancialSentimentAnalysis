@@ -512,12 +512,20 @@ class PretrainedFinancialNER:
 
 # Integration wrapper for your pipeline
 class FinancialNERWrapper(PretrainedFinancialNER):
-    """Wrapper to match UnifiedNER interface"""
+    """Wrapper to match UnifiedNER interface and expose `use_gpu`."""
 
-    def __init__(self, ticker_csv_path: str = None):
-        # Use provided path or defaults
-        super().__init__(master_ticker_csv=ticker_csv_path)
-
+    def __init__(
+        self,
+        ticker_csv_path: str | None = None,
+        use_gpu: bool = True,
+        **kwargs,
+    ):
+        # Forward everything to PretrainedFinancialNER
+        super().__init__(
+            master_ticker_csv=ticker_csv_path,
+            use_gpu=use_gpu,
+            **kwargs,
+        )
         # Compatibility attributes
         self.symbol_dict = {t: self.ticker_to_company.get(
             t, t) for t in self.ticker_set}

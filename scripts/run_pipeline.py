@@ -131,6 +131,10 @@ def main():
     cfg["input_parquet"] = input_path
     cfg["processed_output"] = output_path
 
+    # Remove duplicates to prevent "multiple values" error
+    cfg.pop("input_parquet", None)
+    cfg.pop("processed_output", None)
+
     # Pipeline config
     if args.batch_size is not None:
         cfg["pipeline_config"]["batch_size"] = args.batch_size

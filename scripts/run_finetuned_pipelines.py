@@ -43,11 +43,11 @@ def run_pipeline_with_adapter(model_name, adapter_path, output_file):
         "--input", str(root / "data" /
                        "financial_news_2020_2025_100k.parquet"),
         "--output", str(output_file),
-        "--batch-size", "32"
+        "--batch-size", "32", "--device", "cuda"
         # NO --max-articles limit - process all articles
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, text=True)
 
     if result.returncode == 0:
         print("✅ Pipeline completed successfully!")
@@ -234,11 +234,11 @@ def run_aggregation_ablation(best_adapter_path):
         "--input", str(root / "data" /
                        "financial_news_2020_2025_100k.parquet"),
         "--output", str(output_file),
-        "--batch-size", "32"
+        "--batch-size", "32", "--device", "cuda"
         # NO --max-articles limit - process all articles
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, text=True)
 
     if result.returncode == 0:
         print("✅ Distance weighted pipeline completed!")
@@ -260,7 +260,8 @@ def main():
     finbert_adapter = find_latest_adapter("finbert")
     if finbert_adapter:
         adapter_found = True
-        output_finbert = data_dir / "processed_articles_finetuned_finbert.jsonl"
+        output_finbert = Path(
+            "data/processed_articles_finetuned_finbert.jsonl")
         if run_pipeline_with_adapter("finbert", finbert_adapter, output_finbert):
             pipeline_results['finbert'] = {
                 'adapter': str(finbert_adapter),
@@ -273,7 +274,8 @@ def main():
     deberta_adapter = find_latest_adapter("deberta-fin")
     if deberta_adapter:
         adapter_found = True
-        output_deberta = data_dir / "processed_articles_finetuned_deberta.jsonl"
+        output_deberta = Path(
+            "data/processed_articles_finetuned_deberta.jsonl")
         if run_pipeline_with_adapter("deberta-fin", deberta_adapter, output_deberta):
             pipeline_results['deberta'] = {
                 'adapter': str(deberta_adapter),
