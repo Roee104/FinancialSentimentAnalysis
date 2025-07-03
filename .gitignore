@@ -37,12 +37,6 @@ data/vader_baseline_results.jsonl
 data/quality_filter_stats.csv
 data/financial_news_2020_2025_100k_metadata.json
 
-# ─────────────────────────  MODELS & WEIGHTS ────────────────────────
-models/
-*.pt
-*.pth
-*.onnx
-*.safetensors
 
 # ─────────────────────────  NOTEBOOKS ───────────────────────────────
 .ipynb_checkpoints/
@@ -62,6 +56,6 @@ Thumbs.db
 *.log
 logs/
 !logs/.gitkeep
-
+.cache/
 # packaging artefacts
 *.egg-info/

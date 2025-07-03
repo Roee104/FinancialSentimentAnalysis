@@ -1,14 +1,13 @@
-# core/__init__.py
 """Core functionality modules"""
 
 from core.sentiment import UnifiedSentimentAnalyzer
-# from core.ner import UnifiedNER
 from core.text_processor import TextProcessor
 from core.aggregator import Aggregator
+from core.pretrained_financial_ner import PretrainedFinancialNER
 
 __all__ = [
     'UnifiedSentimentAnalyzer',
-    'UnifiedNER',
+    'PretrainedFinancialNER',
     'TextProcessor',
     'Aggregator'
 ]
