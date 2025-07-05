@@ -99,7 +99,7 @@ class VADERBaseline(BasePipeline):
             }
 
         except Exception as exc:  # noqa: BLE001
-            logger.error("Error processing article: %s", str(exc)[:100]) 
+            logger.error("Error processing article: %s", str(exc)[:100])
             self.stats["errors"] += 1
             return None
 

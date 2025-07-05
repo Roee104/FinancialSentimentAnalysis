@@ -98,7 +98,8 @@ class DataValidator:
         symbols = article.get("symbols", [])
         if not symbols:
             # Look for potential ticker symbols in content
-            potential_tickers = re.findall(r"\b[A-Z]{2,5}\b", content + " " + title)
+            potential_tickers = re.findall(
+                r"\b[A-Z]{2,5}\b", content + " " + title)
             if len(potential_tickers) < 1:
                 return False, "no_symbols"
 

@@ -5,7 +5,6 @@ classification using **LoRA** (or full fine‑tune) and logs experiment metadata
 """
 
 from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -13,7 +12,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
-
+from collections import Counter
+from torch.nn import CrossEntropyLoss
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from transformers import TrainerCallback
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
@@ -24,7 +28,7 @@ from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
 import numpy as np
 np.set_printoptions(legacy='1.25')
 
-# ------------------------------------------------  logging setup
+# ---------------------------------  logging setup ----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="[%(levelname)s] %(message)s",
@@ -43,8 +47,8 @@ EXPT_DIR.mkdir(exist_ok=True, parents=True)
 def timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
-
 # ----------------------------- CLI ------------------------------------------
+
 
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fine‑tune a model with LoRA")
@@ -59,13 +63,27 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
                    help="LoRA rank (only if --lora)")
     p.add_argument("--alpha", type=int, default=32,
                    help="LoRA alpha (only if --lora)")
-    p.add_argument("--gold", type=Path, required=True,
-                   help="Path to gold‑standard JSONL")
+    # p.add_argument("--gold", type=Path, required=True,
+    # help="Path to gold‑standard JSONL")
+    p.add_argument("--train", type=Path, required=True,
+                   help="Path to train set JSONL")
+    p.add_argument("--val", type=Path, required=True,
+                   help="Path to validation set JSONL")
+    p.add_argument("--patience", type=int, default=2,
+                   help="Scheduler patience (ReduceLROnPlateau)")
+    p.add_argument("--factor", type=float, default=0.5,
+                   help="Scheduler factor (ReduceLROnPlateau)")
+    p.add_argument("--lr_scheduler", choices=["reduce", "none"], default="none",
+                   help="Use ReduceLROnPlateau if set to 'reduce'")
+    p.add_argument("--metric_for_best_model", type=str, default="eval_loss",
+                   help="Metric to monitor for LR scheduler or early stopping")
+
     return p.parse_args(argv)
 
 
 # ----------------------- dataset preparation ---------------------------------
 
+# ----------------------- gold_path ---------------------------------
 def load_gold_dataset(gold_path: Path):
     """Return HF Dataset with `text` and `label` columns."""
     raw_train = []
@@ -124,12 +142,83 @@ def load_gold_dataset(gold_path: Path):
     }
 
 
+# ----------------------- train_path|val_path ---------------------------------
+
+def load_dataset_from_two_files(train_path: Path, val_path: Path):
+    """Load HF Datasets from separate train and val JSONL files."""
+    def load_file(path):
+        data = []
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                a = json.loads(line)
+                label = a.get("true_overall", "")
+                if label == "Mixed":
+                    label = "Neutral"
+                if label in ["Positive", "Neutral", "Negative"]:
+                    data.append({
+                        "text": a["content"],
+                        "label": {"Positive": 0, "Neutral": 1, "Negative": 2}[label]
+                    })
+        return Dataset.from_list(data)
+
+    return {
+        "train": load_file(train_path),
+        "validation": load_file(val_path)
+    }
+
+# ----------------------------- evaluate ------------------------------------
+
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = logits.argmax(axis=1)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, predictions, average='weighted')
+    acc = accuracy_score(labels, predictions)
+    return {
+        'accuracy': round(acc, 3),
+        'precision': round(precision, 3),
+        'recall': round(recall, 3),
+        'f1': round(f1, 3),
+    }
+
+
+# ----------------------------- Custom Trainer with weighted loss ------------------------------------
+
+class CustomTrainer(Trainer):
+    def __init__(self, *args, class_weights_tensor=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights_tensor = class_weights_tensor
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        loss_fn = CrossEntropyLoss(weight=self.class_weights_tensor)
+        loss = loss_fn(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+
+# ----------------------------- optimizer: LRScheduler ------------------------------------
+
+
+class LRSchedulerCallback(TrainerCallback):
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if metrics is not None and "eval_loss" in metrics:
+            self.scheduler.step(metrics["eval_loss"])
+
+
 # ----------------------------- main logic ------------------------------------
 
 def main(argv: List[str] | None = None) -> None:
     args = parse_args(argv)
     LOG.info("🏷  Model: %s", args.model)
-    LOG.info("📜 Gold:  %s", args.gold)
+    # LOG.info(" Gold:  %s", args.gold)
+    LOG.info("Train file: %s", args.train)
+    LOG.info("Validation file: %s", args.val)
 
     # --- map shortcut → HF model id
     HF_ID = {
@@ -154,7 +243,7 @@ def main(argv: List[str] | None = None) -> None:
             r=args.rank,
             lora_alpha=args.alpha,
             target_modules=target_modules,
-            lora_dropout=0.05,
+            lora_dropout=0.01,
             bias="none"
         )
         model = get_peft_model(model, lora_cfg)
@@ -162,7 +251,21 @@ def main(argv: List[str] | None = None) -> None:
                  args.rank, args.alpha, target_modules)
 
     # dataset
-    ds = load_gold_dataset(args.gold)
+    # ds = load_gold_dataset(args.gold)
+    ds = load_dataset_from_two_files(args.train, args.val)
+
+    #
+    label_counts = Counter(ds["train"]["label"])
+    total = sum(label_counts.values())
+    num_classes = 3
+
+    # class_weight[c] = total_samples / (num_classes * count[c])
+    class_weights = [total / (num_classes * label_counts[i])
+                     for i in range(num_classes)]
+    class_weights_tensor = torch.tensor(class_weights).to(
+        torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    print("Class weights:", class_weights_tensor)
+
     LOG.info(
         f"Train samples: {len(ds['train'])}, Val samples: {len(ds['validation'])}")
 
@@ -185,26 +288,45 @@ def main(argv: List[str] | None = None) -> None:
         output_dir=str(out_dir),
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=32,
         eval_strategy="epoch",
         logging_strategy="epoch",
-        save_strategy="no",
-        load_best_model_at_end=False,
+        save_strategy="epoch",
+        save_total_limit=5,
+        save_steps=None,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_f1",
         fp16=torch.cuda.is_available(),
         report_to=[],
         label_names=["labels"],  # Explicitly set label names
     )
 
-    trainer = Trainer(
+    # Create optimizer manually
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    # Scheduler: Reduce LR when validation loss plateaus
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=args.factor,
+        patience=args.patience,
+        verbose=True
+    )
+
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
         tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
+        optimizers=(optimizer, scheduler),
+        callbacks=[LRSchedulerCallback(scheduler)]
     )
 
     trainer.train()
+    trainer.save_state()
 
     # save adapter or full model
     if args.lora:

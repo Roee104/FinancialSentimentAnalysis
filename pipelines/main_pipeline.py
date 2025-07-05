@@ -3,9 +3,6 @@ Main pipeline implementation for financial sentiment analysis
 (Revised to use the FinBERT‑based `FinancialNERWrapper` instead of the regex‑only
 `ImprovedNER`).
 
-Compatible with Google Colab GPU instances – the NER component will
-automatically use CUDA when it detects an available device, otherwise it
-falls back to CPU.
 """
 
 import logging

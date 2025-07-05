@@ -1,4 +1,4 @@
-import os
+# core/pretrained_financial_ner.py
 import torch
 import pandas as pd
 import re
@@ -14,9 +14,9 @@ class PretrainedFinancialNER:
     """
 
     def __init__(self,
-                 model_name: str = "yiyanghkust/finbert-ner",
-                 alias_path: str = "data/ticker_alias_table.csv",
-                 master_ticker_path: str = "data/master_ticker_list.csv"):
+               model_name: str = "yiyanghkust/finbert-ner",
+               alias_path: str = "data/ticker_alias_table.csv",
+               master_ticker_path: str = "data/master_ticker_list.csv"):
         self.device = 0 if torch.cuda.is_available() else -1
 
         # Load FinBERT-NER model and tokenizer

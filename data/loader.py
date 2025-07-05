@@ -9,18 +9,14 @@ from transformers import AutoTokenizer
 from tenacity import retry, stop_after_attempt, wait_exponential
 import requests
 import pandas as pd
-import numpy as np
-import aiohttp
 from typing import Dict, List, Optional, Set, Union
 from pathlib import Path
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 import time
-import os          # (still used for env overrides)
 import json
 import hashlib
-import asyncio
+
 
 # ----------------------------------------------------------------- logging FIRST
 import logging
@@ -41,7 +37,7 @@ from config.settings import (
     DATA_COLLECTION,
     DATA_DIR,
     EODHD_API_TOKEN,
-    LOW_QUALITY_PATTERNS,  # noqa: F401  (imported elsewhere in project)
+    LOW_QUALITY_PATTERNS,  
     MODELS,
     QUALITY_FILTER_STATS,
 )

@@ -24,7 +24,7 @@ htmlcov/
 
 # ─────────────────────────  DATA & OUTPUTS ──────────────────────────
 data/*.parquet
-data/processed_*.jsonl
+data/*.jsonl
 data/outputs/
 data/plots/*.png
 data/checkpoints/

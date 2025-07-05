@@ -4,12 +4,10 @@ Improved NER for financial ticker extraction with better accuracy
 
 import re
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Set, Tuple, Union, Optional
+from typing import Dict, List, Set, Tuple
 import logging
 from collections import defaultdict
 from pathlib import Path
-import functools
 import spacy
 from spacy.matcher import PhraseMatcher
 
