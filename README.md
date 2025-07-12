@@ -2,33 +2,6 @@
 
 ---
 
-## 📚 Table of Contents
-
-1. [Overview](#overview)
-2. [Initial Vision & Proposal](#1-initial-vision--proposal)
-3. [Data Collection — Phase I](#2-data-collection--phase-i)
-4. [Building a Gold Standard Dataset](#3-building-a-gold-standard-dataset)
-5. [Interim Stage — Analysis, EDA & Failures](#4-interim-stage--analysis-eda--failures)
-6. [Pipeline Implementation](#5-pipeline-implementation)
-7. [Pivot: From Multi-Level to Overall Sentiment](#6-pivot-from-multi-level-to-overall-sentiment)
-8. [Modeling & Results](#7-modeling--results)
-9. [Technical Challenges](#8-technical-challenges)
-10. [Final Report Stage](#9-final-report-stage)
-11. [Final Deliverable Summary](#final-deliverable-summary)
-12. [Reflection](#reflection)
-13. [How to Run the Project](#how-to-run-the-project)
-    - [Installation & Setup](#1-installation--setup)
-    - [Environment Configuration](#2-environment-configuration)
-    - [Running the Pipeline](#3-running-the-pipeline)
-    - [Outputs](#4-outputs)
-    - [Evaluating Performance](#5-evaluating-performance)
-    - [Common Issues & Fixes](#6-common-issues--fixes)
-    - [File Structure Overview](#7-file-structure-overview)
-    - [Fine-Tuning a LoRA Adapter Model](#8-optional-fine-tuning-a-lora-adapter-model)
-14. [Dataset Examples](#dataset-examples)
-
----
-
 ## 🔖 Overview
 
 This project set out to solve a challenging but practically important task: to analyze **financial news articles** and automatically determine their **sentiment** — overall and, ideally, for specific **tickers** and **sectors**. What began as an ambitious multi-component system eventually evolved — through careful iteration, failed experiments, and problem-solving — into a working, high-performing solution for **overall sentiment classification**, built around a fine-tuned FinBERT model using LoRA.
